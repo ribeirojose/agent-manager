@@ -14,6 +14,7 @@ import (
 	"github.com/YoanWai/agent-manager/internal/config"
 	"github.com/YoanWai/agent-manager/internal/hooks"
 	"github.com/YoanWai/agent-manager/internal/launch"
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/store"
 	"github.com/YoanWai/agent-manager/internal/tmux"
@@ -1836,7 +1837,7 @@ func guestPoller(t *testing.T, st *store.Store) *poller {
 	if err != nil {
 		t.Fatalf("tmux: %v", err)
 	}
-	return &poller{store: st, tmux: driver, hooks: hooks.NewManager(t.TempDir()), interval: time.Second}
+	return &poller{store: st, inboxOwner: sessioncmd.NewInboxOwner(st), tmux: driver, hooks: hooks.NewManager(t.TempDir()), interval: time.Second}
 }
 
 func TestGuestManagerLeavesAnotherServersSessionsAlone(t *testing.T) {

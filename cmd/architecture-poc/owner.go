@@ -30,6 +30,13 @@ func serve(ctx context.Context, dir string, revision int, log io.Writer) error {
 	if revision < 1 || revision > 3 {
 		return fmt.Errorf("revision must be 1, 2, or 3, got %d", revision)
 	}
+	return serveOwner(ctx, dir, revision, log, nil)
+}
+
+func serveOwner(ctx context.Context, dir string, revision int, log io.Writer, initialize func(*ownerState) error) error {
+	if revision < 1 || revision > 4 {
+		return fmt.Errorf("unsupported POC owner revision %d", revision)
+	}
 	profile, err := prepareProfile(dir)
 	if err != nil {
 		return err
@@ -67,6 +74,12 @@ func serve(ctx context.Context, dir string, revision int, log io.Writer) error {
 			Capabilities: capabilitiesForRevision(revision),
 		},
 		store: state,
+	}
+
+	if initialize != nil {
+		if err := initialize(owner); err != nil {
+			return err
+		}
 	}
 
 	address, err := net.ResolveUnixAddr("unix", socket)

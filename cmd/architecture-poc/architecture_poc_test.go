@@ -45,12 +45,16 @@ type testOwner struct {
 
 func startTestOwner(t *testing.T, dir string, revision int) *testOwner {
 	t.Helper()
+	return startOwnerProcess(t, dir, helperCommand("serve", "--dir", dir, "--revision", strconv.Itoa(revision)))
+}
+
+func startOwnerProcess(t *testing.T, dir string, cmd *exec.Cmd) *testOwner {
+	t.Helper()
 	logPath := filepath.Join(t.TempDir(), "owner.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
 		t.Fatalf("create owner log: %v", err)
 	}
-	cmd := helperCommand("serve", "--dir", dir, "--revision", strconv.Itoa(revision))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

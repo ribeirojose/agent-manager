@@ -18,6 +18,7 @@ import (
 	"github.com/YoanWai/agent-manager/internal/hooks"
 	"github.com/YoanWai/agent-manager/internal/keybind"
 	"github.com/YoanWai/agent-manager/internal/mcpreg"
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/store"
 	"github.com/YoanWai/agent-manager/internal/sysstat"
@@ -755,6 +756,15 @@ type errMsg struct{ err error }
 type attachDoneMsg struct {
 	sessID string
 	err    error
+}
+
+func NewWithInboxOwner(cfg config.Config, st *store.Store, driver *tmux.Driver, engine *status.Engine, hookManager *hooks.Manager, version string, owner sessioncmd.InboxMaintenance) *Model {
+	if owner == nil {
+		panic("inbox owner is required for explicit composition")
+	}
+	model := New(cfg, st, driver, engine, hookManager, version)
+	model.poller.inboxOwner = owner
+	return model
 }
 
 func New(cfg config.Config, st *store.Store, driver *tmux.Driver, engine *status.Engine, hookManager *hooks.Manager, version string) *Model {

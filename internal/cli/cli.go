@@ -13,6 +13,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 )
 
 // Command takes its caller as a function so a command that acts as no
@@ -59,6 +61,18 @@ func Commands(version string) map[string]Command {
 			table[command.name] = command.run
 		}
 	}
+	return table
+}
+
+func CommandsWithArchiveOwner(version string, owner sessioncmd.ArchiveOwner) map[string]Command {
+	if owner == nil {
+		panic("archive owner is required for explicit composition")
+	}
+	table := Commands(version)
+	factory := func(configDir string) sessionCommands {
+		return sessioncmd.NewSessionsWithArchiveOwner(configDir, sessioncmd.CLIVocabulary(), owner)
+	}
+	table["archive"] = bind(factory, runArchive)
 	return table
 }
 

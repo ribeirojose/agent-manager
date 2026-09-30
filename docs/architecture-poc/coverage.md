@@ -13,3 +13,7 @@ The target architecture covers the whole application. This proof selects represe
 Use the old owner-only proof as a component. Do not describe local profiles used as remote stand-ins as real network evidence. The transport runner separately exercises real SSH/Linux owners. The application runner must explicitly identify whether its saved route uses that SSH adapter.
 
 Examples of domain extensions are illustrative. A filtered view and fixture rename are not substitutes for real queue, reservation, task or terminal features. Their value is whether new behavior fits without a generic command bus or transport branches spreading into application code.
+
+## First production-code migration
+
+The follow-up extracts the existing sessioncmd archive body and delivered-inbox retention policy, removes the old caller orchestration, and adds explicit owner factories to the production CLI, MCP server and TUI. The migration test drives real CLI/MCP processes and a rendered TUI against a real owner on disposable profiles and named tmux servers. It preserves archive pane/snapshot/validation behavior and retention by delivery time, proves stale-owner refusal, and retains local defaults. TUI archive/restore, delivery heartbeat, other writers and historical-binary cutover remain outside the ownership guarantee. See [migration-design.md](migration-design.md).

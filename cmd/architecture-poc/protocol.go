@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/YoanWai/agent-manager/internal/store"
 )
@@ -138,8 +140,12 @@ type SessionView struct {
 }
 
 type ownerState struct {
-	info  OwnerInfo
-	store *store.Store
+	info         OwnerInfo
+	store        *store.Store
+	mu           sync.Mutex
+	sessionOwner *sessioncmd.SessionOwner
+	inboxOwner   *sessioncmd.InboxOwner
+	migrationLog io.Writer
 }
 
 func capabilitiesForRevision(revision int) []string {
@@ -177,6 +183,8 @@ func (owner *ownerState) succeed(requestID string, result any) Response {
 }
 
 func (owner *ownerState) dispatch(request Request) Response {
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
 	if request.ProtocolMajor != protocolMajor {
 		return owner.reject(request.RequestID, errorUnsupportedProtocol,
 			fmt.Sprintf("owner supports protocol major %d, request uses %d", protocolMajor, request.ProtocolMajor))
@@ -186,6 +194,8 @@ func (owner *ownerState) dispatch(request Request) Response {
 	}
 
 	switch request.Operation {
+	case operationArchiveSession, operationMaintainInbox:
+		return owner.dispatchMigration(request)
 	case operationDescribe:
 		var arguments DescribeArguments
 		if err := decodeArguments(request.Arguments, &arguments); err != nil {

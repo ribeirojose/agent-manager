@@ -65,7 +65,8 @@ type CreateSessionOptions struct {
 
 type Sessions struct {
 	commands
-	newGit func() (*git.Driver, error)
+	newGit       func() (*git.Driver, error)
+	archiveOwner ArchiveOwner
 }
 
 func NewSessions(configDir string, words Vocabulary) *Sessions {
@@ -799,32 +800,14 @@ func (s *Sessions) Revive(sessionID, targetID string) (Session, error) {
 // pane keeps running; archiving only changes where the row is filed, and
 // the last screen is captured first so an archived row still shows one.
 func (s *Sessions) Archive(sessionID, targetID string, archived bool) (Session, error) {
+	request := ArchiveRequest{CallerID: sessionID, TargetID: targetID, Archived: archived, Words: s.words}
+	if s.archiveOwner != nil {
+		return s.archiveOwner.Archive(request)
+	}
 	runtime, err := s.open()
 	if err != nil {
 		return Session{}, err
 	}
 	defer runtime.store.Close()
-	if _, err := runtime.caller(sessionID); err != nil {
-		return Session{}, err
-	}
-	target, err := runtime.agent(targetID)
-	if err != nil {
-		return Session{}, err
-	}
-	if target.ID == sessionID && archived {
-		return Session{}, errors.New("a session cannot archive itself")
-	}
-	running := runtime.driver.Exists(target.ID)
-	if archived && running {
-		if pane, err := runtime.driver.CapturePane(target.ID); err == nil && pane != "" {
-			if err := runtime.store.SetSnapshot(target.ID, pane); err != nil {
-				return Session{}, err
-			}
-		}
-	}
-	if err := runtime.store.SetArchived(target.ID, archived); err != nil {
-		return Session{}, err
-	}
-	target.Archived = archived
-	return runtime.sessionInfo(target, running, false), nil
+	return NewSessionOwner(runtime.cfg, runtime.store, runtime.driver).Archive(request)
 }

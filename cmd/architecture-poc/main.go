@@ -28,6 +28,10 @@ func runCLI(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		return errors.New("usage: architecture-poc <serve|rpc|demo>")
 	}
 	switch args[0] {
+	case "migration-cli", "migration-mcp", "migration-tui":
+		return runMigrationClient(args[0], args[1:])
+	case "serve-migration":
+		return runMigrationOwner(args[1:], stderr)
 	case "serve":
 		set := flag.NewFlagSet("serve", flag.ContinueOnError)
 		set.SetOutput(io.Discard)

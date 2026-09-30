@@ -1,5 +1,7 @@
 # Independent application architecture review
 
+This review records the original isolated POC. The subsequent production-code archive/retention migration is described and verified separately in [migration-design.md](migration-design.md) and the replay guide.
+
 Reviewed against upstream commit `87569e49b62e4dcf9dfd8b754494f9b6ab1d93a8`, the frozen #646 packet, the owner POC, the application slice under `internal/architecturepoc`, `cmd/architecture-workspace-poc`, and the final application evidence.
 
 ## Verdict

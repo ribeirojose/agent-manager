@@ -35,6 +35,7 @@ import (
 // and merely renders them.
 type poller struct {
 	store         *store.Store
+	inboxOwner    sessioncmd.InboxMaintenance
 	tmux          *tmux.Driver
 	engine        *status.Engine
 	hooks         *hooks.Manager
@@ -268,6 +269,7 @@ var postNotification = notify.Notify
 func newPoller(st *store.Store, driver *tmux.Driver, engine *status.Engine, hookManager *hooks.Manager, gitDriver *git.Driver, statusSources, sessionStores, mcpStyles map[string]string, shellTools map[string]bool, binaries toolBinaries, interval time.Duration) *poller {
 	return &poller{
 		store:         st,
+		inboxOwner:    sessioncmd.NewInboxOwner(st),
 		tmux:          driver,
 		engine:        engine,
 		hooks:         hookManager,
@@ -412,7 +414,7 @@ func (p *poller) refreshOnce() tea.Msg {
 	}
 	leading := p.leading
 	if p.tick%inboxPruneEvery == 0 {
-		if err := p.store.PruneInbox(time.Now().Add(-inboxRetention)); err != nil {
+		if err := p.inboxOwner.MaintainInbox(); err != nil {
 			return errMsg{err}
 		}
 	}
@@ -947,7 +949,6 @@ const (
 	// inboxPruneEvery keeps the delivered-message sweep off the hot path;
 	// at the default 2s interval this is roughly every ten minutes.
 	inboxPruneEvery = 300
-	inboxRetention  = 24 * time.Hour
 	// inboxClaimGrace is how long a claim may sit undelivered before the
 	// message counts as abandoned. Claiming and pasting are two steps, and
 	// nothing stops a second manager polling the same store, so a claim
