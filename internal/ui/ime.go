@@ -15,10 +15,7 @@ import (
 )
 
 const (
-	cursorAnchorValid = uint64(1) << 63
-	// The marker never reaches the terminal. It travels through the same
-	// layout and clipping as the cursor cell, then View removes it after
-	// reading the cell's final screen coordinates.
+	cursorAnchorValid  = uint64(1) << 63
 	cursorAnchorMarker = "\x1b]1337;agent-manager-ime-cursor\x07"
 )
 
@@ -59,16 +56,16 @@ func (a *cursorAnchor) get() (col, row int, ok bool) {
 // uses its recorded pane box as a fallback because its caret is painted over
 // captured terminal output rather than by a Bubbles input widget.
 func (m *Model) syncCursorAnchor(frame string) string {
-	if m.imeCursor == nil {
+	if m.focusRuntime.imeCursor == nil {
 		return strings.ReplaceAll(frame, cursorAnchorMarker, "")
 	}
 	if m.mode == modeFocus {
 		col, row, ok := m.focusCursorAnchor()
-		m.imeCursor.set(col, row, ok)
+		m.focusRuntime.imeCursor.set(col, row, ok)
 		return strings.ReplaceAll(frame, cursorAnchorMarker, "")
 	}
 	frame, col, row, ok := cursorMarkerPosition(frame)
-	m.imeCursor.set(col, row, ok)
+	m.focusRuntime.imeCursor.set(col, row, ok)
 	return frame
 }
 
@@ -162,20 +159,14 @@ func insertMarkerAtCursor(view, markedView string) string {
 }
 
 func (m *Model) focusCursorAnchor() (col, row int, ok bool) {
-	if m.mode != modeFocus || m.scrolledBack() || !m.pane.box.ok || !m.pane.cursor.ok {
+	if m.mode != modeFocus {
 		return 0, 0, false
 	}
 	sess, selected := m.selected()
-	if !selected || m.pane.forID != sess.ID {
+	if !selected {
 		return 0, 0, false
 	}
-	box := m.pane.box
-	row = m.pane.cursor.y - m.paneRowOffset(box.height)
-	if row < 0 || row >= box.height {
-		return 0, 0, false
-	}
-	col = min(max(m.pane.cursor.x, 0), box.width-1)
-	return box.x + col + 1, box.y + row + 1, true
+	return m.focusPane.CursorAnchor(sess.ID)
 }
 
 // cursorOutputWriter appends the active input position after each Bubble Tea
@@ -266,14 +257,14 @@ func (w *cursorTTYOutput) WriteString(s string) (int, error) {
 // CursorOutput keeps native TTY detection and terminal sizing while placing
 // the host cursor at the active input caret after each rendered frame.
 func (m *Model) CursorOutput(output *os.File) io.Writer {
-	if m.imeCursor == nil {
-		m.imeCursor = &cursorAnchor{}
+	if m.focusRuntime.imeCursor == nil {
+		m.focusRuntime.imeCursor = &cursorAnchor{}
 	}
 	return &cursorTTYOutput{
 		File: output,
 		writer: &cursorOutputWriter{
 			out:    output,
-			anchor: m.imeCursor,
+			anchor: m.focusRuntime.imeCursor,
 		},
 	}
 }

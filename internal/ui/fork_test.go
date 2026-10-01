@@ -10,6 +10,7 @@ import (
 
 	"github.com/YoanWai/agent-manager/internal/config"
 	"github.com/YoanWai/agent-manager/internal/hooks"
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/store"
 	"github.com/YoanWai/agent-manager/internal/tmux"
@@ -27,28 +28,28 @@ func TestExpandForkCommandQuotesPlaceholders(t *testing.T) {
 func TestForkSelectedSessionCreatesNamedSibling(t *testing.T) {
 	m := buildModel(t)
 	dir := t.TempDir()
-	if err := m.store.CreateGroup("work", dir); err != nil {
+	if err := m.services.store.CreateGroup("work", dir); err != nil {
 		t.Fatal(err)
 	}
 	m.applyCmd(t, m.refreshCmd())
 	createSession(t, m, "source", dir, "work")
 	m.selectSessionRow(t, "source")
-	source := m.rows[m.cursor].sess
-	if err := m.store.SetAgentSessionID(source.ID, "source-conversation"); err != nil {
+	source := railSelectedSession(m)
+	if err := m.services.store.SetAgentSessionID(source.ID, "source-conversation"); err != nil {
 		t.Fatal(err)
 	}
-	for i := range m.sessions {
-		if m.sessions[i].ID == source.ID {
-			m.sessions[i].AgentSessionID = "source-conversation"
+	for i := range m.workspace.sessions {
+		if m.workspace.sessions[i].ID == source.ID {
+			m.workspace.sessions[i].AgentSessionID = "source-conversation"
 		}
 	}
 	m.rebuildRows()
 	m.selectSessionRow(t, "source")
 
 	argsFile := filepath.Join(t.TempDir(), "fork-args")
-	tool := m.cfg.Tools[source.Tool]
+	tool := m.services.cfg.Tools[source.Tool]
 	tool.ForkCommand = "printf '%s\\n' {id} {new_id} {name} > " + tmux.ShellQuote(argsFile) + "; cat"
-	m.cfg.Tools[source.Tool] = tool
+	m.services.cfg.Tools[source.Tool] = tool
 
 	updated, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	m = updated.(*Model)
@@ -79,7 +80,7 @@ func TestForkSelectedSessionCreatesNamedSibling(t *testing.T) {
 	if forkedID == "" {
 		t.Fatal("forked session not found")
 	}
-	stored, err := m.store.Get(forkedID)
+	stored, err := m.services.store.Get(forkedID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,14 +122,14 @@ func TestForkCopiesManagedWorktreeReference(t *testing.T) {
 		WorktreeRepo:   filepath.Dir(dir),
 		WorktreeBranch: "am/source",
 	}
-	if err := m.store.CreateSession(source); err != nil {
+	if err := m.services.store.CreateSession(source); err != nil {
 		t.Fatal(err)
 	}
 	loadStoredRows(t, m)
 	m.selectSessionRow(t, "source")
-	tool := m.cfg.Tools[source.Tool]
+	tool := m.services.cfg.Tools[source.Tool]
 	tool.ForkCommand = "true {id}; cat"
-	m.cfg.Tools[source.Tool] = tool
+	m.services.cfg.Tools[source.Tool] = tool
 
 	m.openFork()
 	m.fork.name.SetValue("forked")
@@ -157,7 +158,7 @@ func TestForkLaunchFailureKeepsSharedWorktree(t *testing.T) {
 	if err := m.spawnSession("claude", "source", repo, "", "", false, true); err != nil {
 		t.Fatal(err)
 	}
-	sessions, err := m.store.ListSessions(true)
+	sessions, err := m.services.store.ListSessions(true)
 	if err != nil || len(sessions) != 1 {
 		t.Fatalf("sessions = %v, err %v", sessions, err)
 	}
@@ -166,12 +167,19 @@ func TestForkLaunchFailureKeepsSharedWorktree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(badConfig, "hooks"), []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m.hooks = hooks.NewManager(badConfig)
+	m.services.hooks = hooks.NewManager(badConfig)
+	m.services.lifecycle, err = sessioncmd.NewLifecycle(sessioncmd.Runtime{
+		Config: m.services.cfg, Store: m.services.store, Driver: m.services.tmux,
+		Hooks: m.services.hooks, Git: m.services.gitDrv, Snapshot: m.services.setSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	forked := source
 	forked.ID = "failed-fork"
 	forked.Name = "forked"
-	if err := m.launchNewSession(forked, m.cfg.Tools[forked.Tool], "cat", launchOptions{}); err == nil {
+	if err := m.launchNewSession(forked, m.services.cfg.Tools[forked.Tool], "cat", launchOptions{}); err == nil {
 		t.Fatal("launch failure was not reported")
 	}
 	if _, err := os.Stat(source.Cwd); err != nil {
@@ -183,25 +191,25 @@ func TestOpenForkRequiresConfiguredCommandAndConversationID(t *testing.T) {
 	m := buildModel(t)
 	createSession(t, m, "source", t.TempDir(), "")
 	m.selectSessionRow(t, "source")
-	source := m.rows[m.cursor].sess
+	source := railSelectedSession(m)
 
-	tool := m.cfg.Tools[source.Tool]
+	tool := m.services.cfg.Tools[source.Tool]
 	tool.ForkCommand = ""
-	m.cfg.Tools[source.Tool] = tool
+	m.services.cfg.Tools[source.Tool] = tool
 	m.openFork()
 	if !strings.Contains(m.errBar.text, "no fork_command") {
 		t.Fatalf("missing command error = %q", m.errBar.text)
 	}
 
 	tool.ForkCommand = "tool --fork latest"
-	m.cfg.Tools[source.Tool] = tool
+	m.services.cfg.Tools[source.Tool] = tool
 	m.openFork()
 	if !strings.Contains(m.errBar.text, "must reference the source via {id} or {session_file}") {
 		t.Fatalf("missing placeholder error = %q", m.errBar.text)
 	}
 
 	tool.ForkCommand = "tool --fork {id}"
-	m.cfg.Tools[source.Tool] = tool
+	m.services.cfg.Tools[source.Tool] = tool
 	m.openFork()
 	if !strings.Contains(m.errBar.text, "no captured conversation id") {
 		t.Fatalf("missing id error = %q", m.errBar.text)
@@ -247,7 +255,7 @@ func TestOpenForkRejectsSessionFileWithoutAFileBackedStore(t *testing.T) {
 		Status:         status.Idle,
 		AgentSessionID: "claude-conversation",
 	}
-	if err := m.store.CreateSession(source); err != nil {
+	if err := m.services.store.CreateSession(source); err != nil {
 		t.Fatal(err)
 	}
 	loadStoredRows(t, m)
@@ -260,12 +268,12 @@ func TestOpenForkRejectsSessionFileWithoutAFileBackedStore(t *testing.T) {
 	}
 	t.Cleanup(func() { forkSessionFileResolver = previousResolver })
 
-	tool := m.cfg.Tools["claude"]
+	tool := m.services.cfg.Tools["claude"]
 	if tool.SessionStore != "" {
 		t.Fatalf("claude session_store = %q, want empty", tool.SessionStore)
 	}
 	tool.ForkCommand = "claude --session-file {session_file}"
-	m.cfg.Tools["claude"] = tool
+	m.services.cfg.Tools["claude"] = tool
 
 	m.openFork()
 
@@ -280,7 +288,7 @@ func TestOpenForkRejectsSessionFileWithoutAFileBackedStore(t *testing.T) {
 
 func TestOpenForkRejectsGroup(t *testing.T) {
 	m := buildModel(t)
-	if err := m.store.CreateGroup("work", ""); err != nil {
+	if err := m.services.store.CreateGroup("work", ""); err != nil {
 		t.Fatal(err)
 	}
 	m.applyCmd(t, m.refreshCmd())
@@ -317,16 +325,16 @@ func TestForkAgentSessionIDFollowsNewIDPlaceholder(t *testing.T) {
 				Status:         status.Idle,
 				AgentSessionID: "source-conversation",
 			}
-			if err := m.store.CreateSession(source); err != nil {
+			if err := m.services.store.CreateSession(source); err != nil {
 				t.Fatal(err)
 			}
 			loadStoredRows(t, m)
 			m.selectSessionRow(t, "source")
 
-			tool := m.cfg.Tools[tc.tool]
+			tool := m.services.cfg.Tools[tc.tool]
 			tool.ForkCommand = tc.forkCmd
 			tool.MCP = "none"
-			m.cfg.Tools[tc.tool] = tool
+			m.services.cfg.Tools[tc.tool] = tool
 
 			m.openFork()
 			if m.errBar.text != "" {
@@ -375,7 +383,7 @@ func TestForkGeminiResolvesSessionFile(t *testing.T) {
 		Status:         status.Idle,
 		AgentSessionID: "gemini-conversation",
 	}
-	if err := m.store.CreateSession(source); err != nil {
+	if err := m.services.store.CreateSession(source); err != nil {
 		t.Fatal(err)
 	}
 	loadStoredRows(t, m)
@@ -395,11 +403,11 @@ func TestForkGeminiResolvesSessionFile(t *testing.T) {
 	t.Cleanup(func() { forkSessionFileResolver = previousResolver })
 
 	argsFile := filepath.Join(t.TempDir(), "fork-args")
-	tool := m.cfg.Tools["gemini"]
+	tool := m.services.cfg.Tools["gemini"]
 	tool.ForkCommand = "printf '%s\\n' {session_file} > " + tmux.ShellQuote(argsFile) + "; cat"
 	tool.SessionStore = "gemini"
 	tool.MCP = "none"
-	m.cfg.Tools["gemini"] = tool
+	m.services.cfg.Tools["gemini"] = tool
 
 	m.openFork()
 	if m.errBar.text != "" {
@@ -458,7 +466,7 @@ func TestForkGeminiResolverFailureReportsError(t *testing.T) {
 		Status:         status.Idle,
 		AgentSessionID: "gemini-conversation",
 	}
-	if err := m.store.CreateSession(source); err != nil {
+	if err := m.services.store.CreateSession(source); err != nil {
 		t.Fatal(err)
 	}
 	loadStoredRows(t, m)
@@ -470,16 +478,17 @@ func TestForkGeminiResolverFailureReportsError(t *testing.T) {
 	}
 	t.Cleanup(func() { forkSessionFileResolver = previousResolver })
 
-	tool := m.cfg.Tools["gemini"]
+	tool := m.services.cfg.Tools["gemini"]
 	tool.ForkCommand = "gemini --session-file {session_file}"
 	tool.SessionStore = "gemini"
-	m.cfg.Tools["gemini"] = tool
+	m.services.cfg.Tools["gemini"] = tool
 
 	before := len(m.sessionRows())
 	m.openFork()
 	m.fork.name.SetValue("forked")
-	updated, _ := m.handleForkKey(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.handleForkKey(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(*Model)
+	m.applyCmd(t, cmd)
 	if !strings.Contains(m.errBar.text, "no gemini session file") {
 		t.Fatalf("resolver error = %q", m.errBar.text)
 	}
@@ -521,28 +530,28 @@ func forkInSourceModel(t *testing.T) (*Model, store.Session, string) {
 	}
 	m := buildModel(t)
 	source := spawnedSession(t, m, "ready-tool")
-	if err := m.store.SetAgentSessionID(source.ID, "source-conversation"); err != nil {
+	if err := m.services.store.SetAgentSessionID(source.ID, "source-conversation"); err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(5 * time.Second); !inboxDeliverable(source.Status); {
+	for deadline := time.Now().Add(5 * time.Second); !(source.Status == status.Finished || source.Status == status.Idle || source.Status == status.Errored); {
 		if time.Now().After(deadline) {
 			t.Fatalf("source never came to rest: %q", source.Status)
 		}
 		time.Sleep(50 * time.Millisecond)
 		m.applyCmd(t, m.refreshCmd())
 		var err error
-		if source, err = m.store.Get(source.ID); err != nil {
+		if source, err = m.services.store.Get(source.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
 	m.selectSessionRow(t, source.Name)
 
 	argsFile := filepath.Join(t.TempDir(), "fork-args")
-	tool := m.cfg.Tools[source.Tool]
+	tool := m.services.cfg.Tools[source.Tool]
 	tool.SessionStore = "muse"
 	tool.ForkKeys = "/fork"
 	tool.ForkCommand = "printf '%s\\n' {new_id} > " + tmux.ShellQuote(argsFile) + "; cat"
-	m.cfg.Tools[source.Tool] = tool
+	m.services.cfg.Tools[source.Tool] = tool
 	return m, source, argsFile
 }
 
@@ -562,7 +571,7 @@ func recordForkWhenTyped(t *testing.T, m *Model, source store.Session, forkID st
 	t.Helper()
 	go func() {
 		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-			pane, err := m.tmux.CapturePane(source.ID)
+			pane, err := m.services.tmux.CapturePane(source.ID)
 			if err != nil || !strings.Contains(pane, "/fork") {
 				continue
 			}
@@ -585,10 +594,13 @@ func TestForkInSourceOpensTheForkTheSourceMade(t *testing.T) {
 	m.fork.name.SetValue("child fork")
 	updated, cmd := m.handleForkKey(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(*Model)
-	if m.mode != modeList {
-		t.Fatalf("after submit: mode = %v, err = %q", m.mode, m.errBar.text)
+	if m.mode != modeFork {
+		t.Fatalf("after submit: mode = %v, err = %q; the dialog stays open while the fork runs", m.mode, m.errBar.text)
 	}
 	m.applyCmd(t, cmd)
+	if m.mode != modeList {
+		t.Fatalf("after completion: mode = %v, err = %q", m.mode, m.errBar.text)
+	}
 	if m.errBar.text != "" {
 		t.Fatalf("fork error = %q", m.errBar.text)
 	}
@@ -616,7 +628,7 @@ func TestForkInSourceOpensTheForkTheSourceMade(t *testing.T) {
 // Typing into a source mid-turn would land the keys in its reply stream.
 func TestForkInSourceRefusesABusySource(t *testing.T) {
 	m, source, _ := forkInSourceModel(t)
-	if err := m.store.UpdateStatus(source.ID, status.Working); err != nil {
+	if err := m.services.store.UpdateStatus(source.ID, status.Working); err != nil {
 		t.Fatal(err)
 	}
 	m.openFork()
@@ -626,7 +638,7 @@ func TestForkInSourceRefusesABusySource(t *testing.T) {
 	if !strings.Contains(m.errBar.text, "fork it once it rests") {
 		t.Fatalf("busy source error = %q", m.errBar.text)
 	}
-	pane, err := m.tmux.CapturePane(source.ID)
+	pane, err := m.services.tmux.CapturePane(source.ID)
 	if err != nil || strings.Contains(pane, "/fork") {
 		t.Fatalf("pane = %q, err = %v; want nothing typed into a busy source", pane, err)
 	}
@@ -646,7 +658,7 @@ func TestForkInSourceRefusesAnUnreadableStore(t *testing.T) {
 	if !strings.Contains(m.errBar.text, "cannot read the forks") {
 		t.Fatalf("unreadable store error = %q", m.errBar.text)
 	}
-	pane, err := m.tmux.CapturePane(source.ID)
+	pane, err := m.services.tmux.CapturePane(source.ID)
 	if err != nil || strings.Contains(pane, "/fork") {
 		t.Fatalf("pane = %q, err = %v; want nothing typed", pane, err)
 	}

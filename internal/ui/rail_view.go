@@ -1,0 +1,185 @@
+package ui
+
+import (
+	"strings"
+
+	uirail "github.com/YoanWai/agent-manager/internal/ui/rail"
+)
+
+const (
+	railGutter    = 2
+	contentGutter = 2
+	railInset     = railGutter - 1
+	shellGlyph    = "❯"
+)
+
+func (m *Model) viewListFrame() string {
+	if m.fullFocus() {
+		m.displayedRail = uirail.Frame{}
+		return m.viewFullFocusFrame()
+	}
+	if m.fullRows() {
+		return m.viewFullListFrame()
+	}
+	leftWidth, rightWidth := m.splitWidths()
+	footer := m.viewFooter()
+	bodyHeight := m.listBodyHeight()
+	contentWidth := rightWidth - 1
+
+	frame := []string{}
+	for _, line := range m.viewHeaderRows() {
+		frame = append(frame, paint(line, m.width, backdropHex()))
+	}
+	bleedWidth := contentWidth - 1
+	railWidth := leftWidth - 1
+	m.prepareRailFrame(railWidth, bodyHeight)
+	railRows := railContentLines(m.displayedRail.Lines)
+	contentRows := m.contentLines(bleedWidth, bodyHeight)
+	seam := make([]string, bodyHeight)
+	edge := make([]string, bodyHeight)
+	for i := range seam {
+		seam[i] = m.seamCell(i < len(railRows) && railRows[i].rule)
+		tone := panelHex()
+		if i < len(railRows) && railRows[i].tone != "" {
+			tone = railRows[i].tone
+		}
+		edge[i] = railEdgeCell(tone)
+	}
+	frame = append(frame, m.railTopRow(leftWidth+1, m.width))
+	frame = append(frame, joinColumns(
+		edge,
+		paintContent(railRows, railWidth, bodyHeight, panelHex()),
+		seam,
+		m.bleedColumn(bodyHeight),
+		paintContent(contentRows, bleedWidth, bodyHeight, backdropHex()),
+	)...)
+	bottom := m.boundedRuleRow(leftWidth+1, m.width, "▄")
+	if m.mode == modeFocus && m.focusPane.FrameBox().Valid {
+		bottom = m.focusBottomRule(leftWidth+1, m.width)
+	}
+	frame = append(frame, bottom)
+	for _, line := range splitLines(footer) {
+		frame = append(frame, paint(line, m.width, backdropHex()))
+	}
+	return m.overlayTopRight(strings.Join(frame, "\n"), m.statusToast(), m.listChromeRows()+1)
+}
+
+func (m *Model) fullRows() bool { return m.prefs.fullLayout && m.mode != modeFocus }
+
+func (m *Model) viewFullListFrame() string {
+	footer := m.viewFooter()
+	bodyHeight := m.listBodyHeight()
+	railWidth := m.width - 1
+
+	frame := []string{}
+	for _, line := range m.viewHeaderRows() {
+		frame = append(frame, paint(line, m.width, backdropHex()))
+	}
+	quickRows := m.fullQuickLines(railWidth, bodyHeight)
+	m.prepareRailFrame(railWidth, bodyHeight-len(quickRows))
+	railRows := railContentLines(m.displayedRail.Lines)
+	for _, line := range quickRows {
+		railRows = append(railRows, line)
+		m.displayedRail.Lines = append(m.displayedRail.Lines, uirail.Line{Text: line.text, Tone: line.tone, Rule: line.rule, Raw: line.raw})
+	}
+	edge := make([]string, bodyHeight)
+	for i := range edge {
+		tone := panelHex()
+		if i < len(railRows) && railRows[i].tone != "" {
+			tone = railRows[i].tone
+		}
+		edge[i] = railEdgeCell(tone)
+	}
+	frame = append(frame, m.railTopRow(railWidth, m.width))
+	frame = append(frame, joinColumns(edge, paintContent(railRows, railWidth, bodyHeight, panelHex()))...)
+	frame = append(frame, m.boundedRuleRow(railWidth, m.width, "▄"))
+	for _, line := range splitLines(footer) {
+		frame = append(frame, paint(line, m.width, backdropHex()))
+	}
+	return m.overlayTopRight(strings.Join(frame, "\n"), m.statusToast(), m.listChromeRows()+1)
+}
+
+func (m *Model) prepareRailFrame(width, height int) {
+	footText := m.railFootLines(width)
+	foot := make([]uirail.Line, len(footText))
+	for i, line := range footText {
+		foot[i].Text = line
+	}
+	rename := uirail.Rename{}
+	if m.mode == modeRename {
+		if m.rename.isGroup {
+			rename.Target = uirail.Selection{Kind: uirail.GroupRow, Group: m.rename.path}
+		} else {
+			rename.Target = uirail.Selection{Kind: uirail.SessionRow, SessionID: m.rename.sessID}
+			if session, ok := m.sessionByID(m.rename.sessID); ok {
+				rename.Target.Group = session.Group
+			}
+		}
+		fieldWidth := width - 4
+		for _, row := range m.rail.Rows() {
+			if row.Selection == rename.Target {
+				fieldWidth -= 3 * row.Depth
+				break
+			}
+		}
+		if fieldWidth >= 5 {
+			m.rename.input.Width = fieldWidth
+		}
+		rename.View = textInputView(m.rename.input)
+	}
+	ctx := uirail.RenderContext{
+		Width:           width,
+		Height:          max(height, 0),
+		TerminalWidth:   m.width,
+		TerminalHeight:  m.height,
+		BodyOriginY:     m.listChromeRows(),
+		Theme:           m.railTheme(),
+		ListKeys:        m.services.listKeys,
+		ComfortableRows: m.prefs.comfortableRows,
+		MouseDisabled:   m.prefs.mouseDisabled,
+		Focused:         m.mode == modeFocus,
+		EnterFocuses:    m.enterFocuses(),
+		StartupPhase:    m.startup.startupPhase,
+		CursorMarker:    cursorAnchorMarker,
+		Rename:          rename,
+		Foot:            foot,
+	}
+	m.displayedRail = m.rail.Render(ctx, m.displayedRail)
+	m.placeRailNoticeHit()
+}
+
+func (m *Model) railTheme() uirail.Theme {
+	return uirail.Theme{
+		Bg: current.Bg, Surface: current.Surface, Overlay: current.Overlay, Border: current.Border,
+		Bright: current.Bright, Text: current.Text, Dim: current.Dim, Subtle: current.Subtle,
+		Accent: current.Accent, Accent2: current.Accent2,
+		Working: current.Working, Waiting: current.Waiting, Finished: current.Finished,
+		Errored: current.Errored, Idle: current.Idle,
+	}
+}
+
+func railContentLines(lines []uirail.Line) []contentLine {
+	out := make([]contentLine, len(lines))
+	for i, line := range lines {
+		out[i] = contentLine{text: line.Text, tone: line.Tone, rule: line.Rule, raw: line.Raw}
+	}
+	return out
+}
+
+func (m *Model) placeRailNoticeHit() {
+	if m.displayedRail.FootLines == 0 || !m.notices.noticeHit.ok {
+		m.notices.noticeHit = noticeHit{}
+		return
+	}
+	m.notices.noticeHit.x0++
+	m.notices.noticeHit.x1++
+	m.notices.noticeHit.y0 = m.listChromeRows() + m.displayedRail.FootStart
+	m.notices.noticeHit.y1 = m.notices.noticeHit.y0 + m.displayedRail.FootLines
+}
+
+func (m *Model) overlayRowMenu(frame string) string { return m.displayedRail.Overlay(frame) }
+
+func (m *Model) railLines(width, height int) []contentLine {
+	m.prepareRailFrame(width, height)
+	return railContentLines(m.displayedRail.Lines)
+}

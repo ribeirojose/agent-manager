@@ -71,7 +71,7 @@ func TestOpenedEditorReadsAsAnOutcome(t *testing.T) {
 	m.selectSessionRow(t, "agent")
 
 	_, cmd := m.openEditor()
-	m.applyCmd(t, cmd)
+	applyEditorLookup(t, m, cmd)
 	if len(*launched) == 0 {
 		t.Fatalf("the editor never launched, status = %q", m.errBar.text)
 	}
@@ -148,8 +148,8 @@ func TestSpliceAtColumnKeepsWidth(t *testing.T) {
 func TestSearchFieldSitsInTheRail(t *testing.T) {
 	m := shotModel()
 	m.width, m.height = 120, 34
-	m.searching = true
-	m.search = "rate"
+	m.rail.SetSearch(m.rail.Search(), true)
+	m.rail.SetSearch("rate", m.rail.Searching())
 
 	if status := ansi.Strip(m.statusLine()); strings.Contains(status, "rate") {
 		t.Fatalf("the query moved to the rail, the notice should not repeat it: %q", status)

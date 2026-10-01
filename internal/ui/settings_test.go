@@ -16,11 +16,12 @@ import (
 
 func TestDefaultToolFallsBackWhenSettingStale(t *testing.T) {
 	m := buildModel(t)
-	if err := m.store.SetSetting("default_tool", "deleted-tool"); err != nil {
+	if err := m.services.store.SetSetting("default_tool", "deleted-tool"); err != nil {
 		t.Fatalf("set setting: %v", err)
 	}
-	if got := m.defaultTool(); got != "claude" {
-		t.Fatalf("defaultTool = %q want claude (alphabetical fallback)", got)
+	m.applyTestMsg(t, m.openForm()())
+	if got := m.form.toolNames[m.form.toolIndex]; got != "claude" {
+		t.Fatalf("form default tool = %q want claude (alphabetical fallback)", got)
 	}
 }
 
@@ -29,7 +30,7 @@ func TestDefaultSplitLayout(t *testing.T) {
 	if !m.defaultSplitLayout() {
 		t.Fatal("split should be the default layout")
 	}
-	if err := m.store.SetSetting(diffLayoutSetting, "unified"); err != nil {
+	if err := m.services.store.SetSetting(diffLayoutSetting, "unified"); err != nil {
 		t.Fatal(err)
 	}
 	if m.defaultSplitLayout() {
@@ -50,9 +51,10 @@ func TestSettingsTogglesQuickClose(t *testing.T) {
 		t.Fatalf("stepping down should reach the quick send field, got %d", m.settings.field)
 	}
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyRight})
-	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if !m.quickCloseAfterSend() {
-		t.Fatal("close choice should persist after toggle")
+	_, cmd := m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.applyCmd(t, cmd)
+	if chosen, err := m.services.store.Setting(quickCloseSetting); err != nil || chosen != "close" {
+		t.Fatalf("close choice = %q err %v, want persisted close", chosen, err)
 	}
 }
 
@@ -73,7 +75,8 @@ func TestSettingsTogglesReviewLayout(t *testing.T) {
 		t.Fatalf("stepping down should reach the layout field, got %d", m.settings.field)
 	}
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyLeft})
-	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	_, cmd := m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.applyCmd(t, cmd)
 	if got := m.defaultSplitLayout(); got {
 		t.Fatal("layout should persist as unified after toggle")
 	}
@@ -86,12 +89,10 @@ func TestSettingsWorktreeDefaultPersists(t *testing.T) {
 		m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyRight})
-	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if chosen, err := m.store.Setting(worktreeSetting); err != nil || chosen != "on" {
+	_, cmd := m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.applyCmd(t, cmd)
+	if chosen, err := m.services.store.Setting(worktreeSetting); err != nil || chosen != "on" {
 		t.Fatalf("want stored on, got %q err %v", chosen, err)
-	}
-	if !m.defaultWorktree() {
-		t.Fatal("defaultWorktree should now report on")
 	}
 }
 
@@ -112,7 +113,8 @@ func TestSettingsCoordinationBriefsTheNextSpawn(t *testing.T) {
 		t.Fatalf("the stepped row does not read proactive:\n%s", ansi.Strip(m.viewSettings()))
 	}
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if proactive, err := m.store.ProactiveCoordination(); err != nil || !proactive {
+	m.drainEffects(t)
+	if proactive, err := m.services.store.ProactiveCoordination(); err != nil || !proactive {
 		t.Fatalf("want proactive stored, got %v err %v", proactive, err)
 	}
 
@@ -121,7 +123,7 @@ func TestSettingsCoordinationBriefsTheNextSpawn(t *testing.T) {
 	if err := m.spawnSession("ready-tool", "api-build", t.TempDir(), "", "build the api", false, false); err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	sess, err := m.store.Get(m.sessionRows()[0].ID)
+	sess, err := m.services.store.Get(m.sessionRows()[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,10 +148,11 @@ func TestSettingsNotificationsPersist(t *testing.T) {
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyDown})
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyRight})
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if chosen, err := m.store.Setting(notificationsSetting); err != nil || chosen != "off" {
+	m.drainEffects(t)
+	if chosen, err := m.services.store.Setting(notificationsSetting); err != nil || chosen != "off" {
 		t.Fatalf("want stored off, got %q err %v", chosen, err)
 	}
-	if chosen, err := m.store.Setting(notifyFinishedSetting); err != nil || chosen != "on" {
+	if chosen, err := m.services.store.Setting(notifyFinishedSetting); err != nil || chosen != "on" {
 		t.Fatalf("want stored on, got %q err %v", chosen, err)
 	}
 }
@@ -164,14 +167,15 @@ func TestSettingsMouseTogglePersists(t *testing.T) {
 		m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyLeft})
-	m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if chosen, err := m.store.Setting(mouseSetting); err != nil || chosen != "off" {
+	_, cmd := m.handleSettingsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.applyCmd(t, cmd)
+	if chosen, err := m.services.store.Setting(mouseSetting); err != nil || chosen != "off" {
 		t.Fatalf("want stored off, got %q err %v", chosen, err)
 	}
-	if !m.mouseDisabled {
+	if !m.prefs.mouseDisabled {
 		t.Fatal("model should carry the toggled value after save")
 	}
-	if loaded := New(m.cfg, m.store, m.tmux, m.poller.engine, m.hooks, "dev"); !loaded.mouseDisabled {
+	if loaded := New(m.services.cfg, m.services.store, m.services.tmux, m.services.engine, m.services.hooks, "dev"); !loaded.prefs.mouseDisabled {
 		t.Fatal("a fresh model should reload the persisted choice")
 	}
 }
@@ -208,7 +212,7 @@ func TestSettingsShowsVersion(t *testing.T) {
 
 func TestSettingsBugReportRowOpensIssue(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.openSettings()
 	if m.mode != modeSettings {
 		t.Fatalf("settings should open, mode=%v", m.mode)
@@ -245,7 +249,7 @@ func TestSettingsBugReportRowOpensIssue(t *testing.T) {
 
 func TestSettingsFeatureRequestRowOpensForm(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.openSettings()
 
 	var opened string
@@ -271,7 +275,7 @@ func TestSettingsFeatureRequestRowOpensForm(t *testing.T) {
 
 func TestSettingsBugReportRowIsHighlighted(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.openSettings()
 	// Keep focus off the CTA rows so the accent2 unfocused styling is what paints.
 	m.settings.field = settingsFieldTool
@@ -296,7 +300,7 @@ func TestSettingsBugReportRowIsHighlighted(t *testing.T) {
 
 func TestSettingsCLIPickerHidesFromNewSessions(t *testing.T) {
 	m := buildModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{
 		"claude": {Command: "cat"},
 		"codex":  {Command: "cat"},
 		"grok":   {Command: "cat"},
@@ -324,15 +328,16 @@ func TestSettingsCLIPickerHidesFromNewSessions(t *testing.T) {
 		t.Fatal("space should hide the focused CLI")
 	}
 	m.handleSettingsKey(key("esc"))
+	m.drainEffects(t)
 	if m.settings.cliPicker {
 		t.Fatal("esc should leave the picker")
 	}
-	raw, err := m.store.Setting(hiddenToolsSetting)
+	raw, err := m.services.store.Setting(hiddenToolsSetting)
 	if err != nil || raw != "codex" {
 		t.Fatalf("stored hidden_tools = %q err %v, want codex", raw, err)
 	}
 
-	enabled := m.enabledToolNames()
+	enabled := m.cachedEnabledToolNames()
 	for _, name := range enabled {
 		if name == "codex" {
 			t.Fatalf("codex should be omitted from create pickers: %v", enabled)
@@ -351,7 +356,7 @@ func TestSettingsCLIPickerHidesFromNewSessions(t *testing.T) {
 
 func TestSettingsCLIPickerKeepsOneEnabled(t *testing.T) {
 	m := buildModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{
 		"claude": {Command: "cat"},
 		"codex":  {Command: "cat"},
 	}}
@@ -375,7 +380,7 @@ func TestSettingsCLIPickerKeepsOneEnabled(t *testing.T) {
 
 func TestSettingsCLIRequestSupportOpensIssue(t *testing.T) {
 	m := buildModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	var opened string
 	openBrowser = func(url string) error {
 		opened = url
@@ -401,7 +406,7 @@ func TestSettingsCLIRequestSupportOpensIssue(t *testing.T) {
 
 func TestCLIPickerShowsSupportAction(t *testing.T) {
 	m := buildModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{
 		"claude": {Command: "cat"},
 		"codex":  {Command: "cat"},
 	}}
@@ -434,7 +439,7 @@ func TestParseFormatHiddenTools(t *testing.T) {
 
 func TestSettingsUpdateRowAppliesOnEnter(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.update.version = "v0.2.0"
 	m.update.latest = "v0.3.0"
 	m.openSettings()
@@ -470,17 +475,38 @@ func TestSettingsUpdateRowAppliesOnEnter(t *testing.T) {
 	if m.mode != modeSettings {
 		t.Fatal("starting the update must keep settings open")
 	}
-	msg, ok := cmd().(updateAppliedMsg)
-	if !ok {
-		t.Fatalf("cmd returned %T", cmd())
+	completed := cmd().(effectCompletedMsg)
+	if completed.err != nil {
+		t.Fatalf("staged settings save: %v", completed.err)
 	}
-	if msg.err != nil {
-		t.Fatalf("apply: %v", msg.err)
+	updated, next := m.Update(completed)
+	m = updated.(*Model)
+	if next == nil {
+		t.Fatal("no update command after the save completed")
+	}
+	var msg tea.Msg
+	switch batch := next().(type) {
+	case tea.BatchMsg:
+		for _, c := range batch {
+			if c != nil {
+				msg = c()
+				break
+			}
+		}
+	default:
+		msg = next()
+	}
+	swap, ok := msg.(updateAppliedMsg)
+	if !ok {
+		t.Fatalf("update command returned %T", msg)
+	}
+	if swap.err != nil {
+		t.Fatalf("apply: %v", swap.err)
 	}
 	if !strings.HasPrefix(applied, "v0.6.0 ") {
 		t.Fatalf("applyUpdate saw %q", applied)
 	}
-	updated, quit := m.Update(msg)
+	updated, quit := m.Update(swap)
 	m = updated.(*Model)
 	if m.update.applying {
 		t.Fatal("applying should clear once the swap lands")
@@ -495,7 +521,7 @@ func TestSettingsUpdateRowAppliesOnEnter(t *testing.T) {
 
 func TestSettingsUpdateRowIdleWhenCurrent(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.update.version = "v0.3.0"
 	m.openSettings()
 	m.settings.field = settingsFieldUpdate
@@ -508,8 +534,9 @@ func TestSettingsUpdateRowIdleWhenCurrent(t *testing.T) {
 		return nil
 	}
 
-	_, cmd := m.handleSettingsKey(key("enter"))
-	if called || cmd != nil || m.update.applying {
+	m.handleSettingsKey(key("enter"))
+	m.drainEffects(t)
+	if called || m.update.applying {
 		t.Fatal("enter on version when up to date must not start an update")
 	}
 	if m.mode != modeList {
@@ -519,7 +546,7 @@ func TestSettingsUpdateRowIdleWhenCurrent(t *testing.T) {
 
 func TestSettingsUpdateRowApplyFailureSurfaces(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.update.version = "v0.2.0"
 	m.update.latest = "v0.3.0"
 	m.openSettings()
@@ -541,7 +568,20 @@ func TestSettingsUpdateRowApplyFailureSurfaces(t *testing.T) {
 	}
 
 	_, cmd := m.handleSettingsKey(key("enter"))
-	updated, _ := m.Update(cmd().(updateAppliedMsg))
+	completed := cmd().(effectCompletedMsg)
+	if completed.err != nil {
+		t.Fatalf("staged settings save: %v", completed.err)
+	}
+	updated, next := m.Update(completed)
+	m = updated.(*Model)
+	if next == nil {
+		t.Fatal("no update command after the save completed")
+	}
+	swap, ok := next().(updateAppliedMsg)
+	if !ok {
+		t.Fatalf("update command returned %T", next())
+	}
+	updated, _ = m.Update(swap)
 	m = updated.(*Model)
 	if m.update.applying {
 		t.Fatal("applying should clear on failure")
@@ -556,7 +596,7 @@ func TestSettingsUpdateRowApplyFailureSurfaces(t *testing.T) {
 
 func TestSettingsUpdateRowPersistsStagedSettings(t *testing.T) {
 	m := footModel(t)
-	m.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
+	m.services.cfg = config.Config{Tools: map[string]config.Tool{"claude": {Command: "cat"}}}
 	m.update.version = "v0.2.0"
 	m.update.latest = "v0.3.0"
 	m.openSettings()
@@ -577,10 +617,12 @@ func TestSettingsUpdateRowPersistsStagedSettings(t *testing.T) {
 	}
 	applyUpdate = func(context.Context, string, string) error { return nil }
 
-	if _, cmd := m.handleSettingsKey(key("enter")); cmd == nil {
+	_, cmd := m.handleSettingsKey(key("enter"))
+	if cmd == nil {
 		t.Fatal("enter on the update row should start the update")
 	}
-	got, err := m.store.Setting(themeSetting)
+	m.applyCmd(t, cmd)
+	got, err := m.services.store.Setting(themeSetting)
 	if err != nil {
 		t.Fatal(err)
 	}

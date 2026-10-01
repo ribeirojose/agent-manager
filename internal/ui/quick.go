@@ -3,16 +3,21 @@ package ui
 import (
 	"strings"
 
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-func (m *Model) openQuickMode() {
-	names, index := m.spawnToolSelection()
+func (m *Model) openQuickMode() tea.Cmd {
+	return m.openQuickModeWithReader(storeSettingWriter{st: m.services.store})
+}
+
+func (m *Model) openQuickModeWithReader(reader settingsValueReader) tea.Cmd {
+	names, index := m.cachedSpawnToolSelection()
 	if len(names) == 0 {
 		m.errBar.text = "no CLIs enabled: open settings (s), then CLIs, to turn some on"
-		return
+		return nil
 	}
 	input := textarea.New()
 	input.CharLimit = 2000
@@ -34,33 +39,21 @@ func (m *Model) openQuickMode() {
 		composer:       composer{input: input, maxRows: quickBarMaxRows, gen: m.nextComposerGen()},
 		toolNames:      names,
 		toolIndex:      index,
-		closeAfterSend: m.quickCloseAfterSend(),
-		worktree:       m.spawnWorktreeDefault(m.quickTargetGroup()),
+		closeAfterSend: m.settingsCache.value(quickCloseSetting) == "close",
+		worktree:       m.cachedSpawnWorktreeDefault(m.quickTargetGroup()),
 	}
+	if m.settingsPending > 0 {
+		return m.quickWorktreeProbeCmd(false)
+	}
+	return settingsLoadCmd(settingsLoadRequest{target: settingsLoadQuick, generation: uint64(m.quick.gen)}, reader)
 }
 
-// defaultToolSelection returns enabled tool names with the index of
-// the configured default, ready to seed a tool picker.
-func (m *Model) defaultToolSelection() ([]string, int) {
-	names := m.enabledToolNames()
-	current := m.defaultTool()
-	index := 0
-	for i, name := range names {
-		if name == current {
-			index = i
-		}
+func (m *Model) applyCachedQuickDefaults() {
+	m.quick.toolNames, m.quick.toolIndex = m.cachedSpawnToolSelection()
+	m.quick.closeAfterSend = m.settingsCache.value(quickCloseSetting) == "close"
+	if !m.quick.worktreeTouched {
+		m.quick.worktree = m.cachedSpawnWorktreeDefault(m.quickTargetGroup())
 	}
-	return names, index
-}
-
-func (m *Model) spawnToolSelection() ([]string, int) {
-	names, index := m.defaultToolSelection()
-	for i, name := range names {
-		if name == m.lastSpawnTool {
-			return names, i
-		}
-	}
-	return names, index
 }
 
 // handleQuickKey runs while the quick bar is docked in the sidebar: arrows
@@ -79,31 +72,37 @@ func (m *Model) handleQuickKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cmd, stepped := m.quick.stepRow(msg); stepped {
 			return m, cmd
 		}
-		return m, m.moveCursor(-1)
+		return m, tea.Batch(m.moveCursor(-1), m.quickWorktreeProbeCmd(false))
 	case "down":
 		if cmd, stepped := m.quick.stepRow(msg); stepped {
 			return m, cmd
 		}
-		return m, m.moveCursor(1)
+		return m, tea.Batch(m.moveCursor(1), m.quickWorktreeProbeCmd(false))
 	case "tab", "alt+m":
 		if len(m.quick.toolNames) > 0 {
 			m.quick.toolIndex = (m.quick.toolIndex + 1) % len(m.quick.toolNames)
 		}
+		m.quick.defaultsTouched = true
 		return m, nil
 	case "shift+tab":
 		if n := len(m.quick.toolNames); n > 0 {
 			m.quick.toolIndex = (m.quick.toolIndex + n - 1) % n
 		}
+		m.quick.defaultsTouched = true
 		return m, nil
 	case "ctrl+t", "alt+w":
-		dir := m.quickTargetDir()
-		if !m.worktreeCapable(dir) {
-			m.errBar.text = "worktree sessions need a git repository: " + dir + " is not one"
+		capable, known := m.cachedWorktreeCapability(m.quickTargetDir())
+		if !known {
+			return m, m.quickWorktreeProbeCmd(true)
+		}
+		if !capable {
+			m.errBar.text = "worktree sessions need a git repository: " + m.quickTargetDir() + " is not one"
 			return m, nil
 		}
 		m.errBar.text = ""
-		m.quick.worktree = !m.quickWorktreeOn()
+		m.quick.worktree = !m.quick.worktree
 		m.quick.worktreeTouched = true
+		m.quick.defaultsTouched = true
 		return m, nil
 	case "enter":
 		return m.submitQuick()
@@ -136,34 +135,26 @@ func (m *Model) submitQuick() (tea.Model, tea.Cmd) {
 	if entry.isGroup {
 		return m.quickSpawn(entry.group, text)
 	}
-	if m.isShell(entry.sess.Tool) {
-		m.errBar.text = shellPromptHint(entry.sess.Name)
+	request := quickSendRequest{
+		session:        entry.sess,
+		composerGen:    m.quick.gen,
+		draft:          m.quick.input.Value(),
+		text:           text,
+		closeAfterSend: m.quick.closeAfterSend,
+		images:         m.quick.attachments,
+	}
+	if !m.dispatchQuickSend(request) {
 		return m, nil
 	}
-	if !m.tmux.Exists(entry.sess.ID) {
-		m.errBar.text = deadSessionHint
-		return m, nil
-	}
-	if err := m.tmux.SendText(entry.sess.ID, text); err != nil {
-		m.errBar.text = err.Error()
-		return m, nil
-	}
-	// The prompt is delivered: clear the input before anything else can
-	// fail, so a retry cannot send it twice.
-	m.clearQuickAfterSend()
 	m.errBar.text = ""
-	// A queued answer means the user expects a fresh finished alert.
-	if err := m.store.SetAcked(entry.sess.ID, false); err != nil {
-		m.errBar.text = "prompt sent, but clearing the alert ack failed: " + err.Error()
-	}
-	if err := m.store.SetLastPrompt(entry.sess.ID, text); err != nil {
-		m.errBar.text = "prompt sent, but recording it for the row failed: " + err.Error()
-	}
-	m.requestRefresh()
-	return m, nil
+	return m, m.nextEffectCmd()
 }
 
 func (m *Model) quickSpawn(group, prompt string) (tea.Model, tea.Cmd) {
+	return m.quickSpawnWithReader(group, prompt, systemDirectoryPreflight{git: m.services.gitDrv})
+}
+
+func (m *Model) quickSpawnWithReader(group, prompt string, reader directoryPreflight) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(prompt, "-") {
 		m.errBar.text = `prompt cannot start with "-": the tool would read it as a flag`
 		return m, nil
@@ -173,39 +164,32 @@ func (m *Model) quickSpawn(group, prompt string) (tea.Model, tea.Cmd) {
 		m.errBar.text = "no tools configured"
 		return m, nil
 	}
-	dir, ok := resolveExistingDir(m.groupPaths[group], m.groupDefaultDir(group))
-	if !ok {
-		m.errBar.text = "group has no valid default path: " + dir
-		return m, nil
-	}
 	name := toolName + "-" + newID()[:4]
-	worktree := m.quickWorktreeOn()
-	pickWorktree := m.spawnWorktreeDefault(group)
+	pickWorktree := m.cachedSpawnWorktreeDefault(group)
 	if m.quick.worktreeTouched {
 		pickWorktree = m.quick.worktree
 	}
-	spawn := func() error {
-		if err := m.spawnSession(toolName, name, dir, group, prompt, true, worktree); err != nil {
-			return err
-		}
-		m.rememberSpawnPick(toolName, pickWorktree)
-		return nil
+	paneW, paneH := m.paneTargetSize()
+	request := spawnRequest{
+		kind:         spawnQuick,
+		toolName:     toolName,
+		name:         name,
+		group:        group,
+		prompt:       prompt,
+		autoNamed:    true,
+		pickWorktree: pickWorktree,
+		pane:         sessioncmd.PaneSize{Width: paneW, Height: paneH},
+		composerGen:  m.quick.gen,
+		images:       m.quick.attachments,
+		draft:        m.quick.input.Value(),
+		rawDir:       m.workspace.groupPaths[group],
+		dirFallbacks: m.groupDirCandidates(group),
+		wantWorktree: pickWorktree,
+		dirReader:    reader,
 	}
-	if err := spawn(); err != nil {
-		m.reportLaunchError(err, spawn)
-		// A spawn the hint dialog refused leaves nothing to send, so the
-		// bar closes instead of swallowing the list keys behind the dialog;
-		// the dialog releases its images once no install can still spawn it.
-		if m.mode == modeLaunchHint {
-			m.quick.active = false
-		}
-		return m, nil
-	}
-	// Spawned sessions start outside the attention set; clear so the new row shows.
-	m.statusFilter = statusFilterAll
-	m.clearQuickAfterSend()
 	m.errBar.text = ""
-	return m, m.refreshCmd()
+	m.dispatchSpawn(request)
+	return m, m.nextEffectCmd()
 }
 
 // clearQuickAfterSend empties the bar for the next prompt, and dismisses it
@@ -218,17 +202,15 @@ func (m *Model) clearQuickAfterSend() {
 	}
 }
 
-// quickWorktreeOn is the worktree state the quick bar shows and spawns
-// with: the target group's default until ctrl+t overrides it, and off
-// whenever the target directory cannot host a worktree.
 func (m *Model) quickWorktreeOn() bool {
-	if !m.worktreeCapable(m.quickTargetDir()) {
+	capable, known := m.cachedWorktreeCapability(m.quickTargetDir())
+	if !known || !capable {
 		return false
 	}
 	if m.quick.worktreeTouched {
 		return m.quick.worktree
 	}
-	return m.spawnWorktreeDefault(m.quickTargetGroup())
+	return m.cachedSpawnWorktreeDefault(m.quickTargetGroup())
 }
 
 // quickTargetGroup is the group a quick spawn would land in: the selected
@@ -248,8 +230,7 @@ func (m *Model) quickTargetGroup() string {
 // the same way quickSpawn resolves it.
 func (m *Model) quickTargetDir() string {
 	group := m.quickTargetGroup()
-	dir, _ := resolveExistingDir(m.groupPaths[group], m.groupDefaultDir(group))
-	return dir
+	return m.capturedAbsolutePath(m.workspace.groupPaths[group], m.capturedGroupDefaultDir(group))
 }
 
 // quickTool is the spawn CLI for the current quick-mode run: the settings
@@ -259,16 +240,4 @@ func (m *Model) quickTool() string {
 		return ""
 	}
 	return m.quick.toolNames[m.quick.toolIndex]
-}
-
-// quickCloseAfterSend reports whether the quick bar should dismiss itself
-// once a prompt is delivered. Staying open is the default; a stored "close"
-// choice opts in. A store error is surfaced but still yields the default.
-func (m *Model) quickCloseAfterSend() bool {
-	chosen, err := m.store.Setting(quickCloseSetting)
-	if err != nil {
-		m.errBar.text = "reading quick prompt setting: " + err.Error()
-		return false
-	}
-	return chosen == "close"
 }

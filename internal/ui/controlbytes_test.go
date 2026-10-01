@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/YoanWai/agent-manager/internal/diff"
+	"github.com/YoanWai/agent-manager/internal/git"
+	uireview "github.com/YoanWai/agent-manager/internal/ui/review"
 )
 
 // The reviewed repo is code the user did not write. Our own rendering emits
@@ -136,14 +139,14 @@ func TestEscapeSpansFollowTheEscapedText(t *testing.T) {
 // name is content the review header paints, not something the user typed.
 func TestSessionNameCannotDriveTheTerminal(t *testing.T) {
 	m := buildModel(t)
-	if m.gitDrv == nil {
+	if m.services.gitDrv == nil {
 		t.Skip("git not installed")
 	}
 	openReviewOn(t, m, "named", gitRepoWithTwoChangedFiles(t))
 	m.width, m.height = 120, 40
-	for i := range m.sessions {
-		if m.sessions[i].ID == m.diff.sessID {
-			m.sessions[i].Name = "rev\x1b]0;PWNED\x07iew"
+	for i := range m.workspace.sessions {
+		if m.workspace.sessions[i].ID == m.review.Snapshot().SessionID {
+			m.workspace.sessions[i].Name = "rev\x1b]0;PWNED\x07iew"
 		}
 	}
 
@@ -155,11 +158,11 @@ func TestSessionNameCannotDriveTheTerminal(t *testing.T) {
 		t.Errorf("a session name leaks a control byte near %q", stray)
 	}
 
-	m.diff.notice = "sent review round 1 to rev\x1b]0;PWNED\x07iew"
+	state := m.review.Snapshot()
+	m.review.ApplySend(uireview.SendResult{TargetID: state.SessionID, RepoRoot: state.RepoSelected, Round: 1, Count: 1, TargetName: "rev\x1b]0;PWNED\x07iew", Outcome: uireview.SendConfirmed})
 	if stray := strayControl(m.viewDiffFooter()); stray != "" {
 		t.Errorf("the review notice leaks a control byte near %q", stray)
 	}
-	m.diff.notice = ""
 	m.errBar.text = "rename failed for rev\x1b]0;PWNED\x07iew"
 	if stray := strayControl(m.statusMessage("✕", "●", "▲")); stray != "" {
 		t.Errorf("the status bar leaks a control byte near %q", stray)
@@ -171,7 +174,8 @@ func TestSessionNameCannotDriveTheTerminal(t *testing.T) {
 // state owns the rows to show it; paint would truncate a folded single row.
 func TestMultiLineGitErrorKeepsItsLines(t *testing.T) {
 	m := buildModel(t)
-	m.diff.errText = "fatal: ambiguous argument 'x'\nUse '--' to separate paths from revisions"
+	req := seedReviewForTest(m, uireview.Target{ID: "s1", Cwd: "/repo"}, git.ScopeUncommitted, "/repo", diff.Set{}, false)
+	m.review.ApplyLoad(uireview.LoadResult{TargetID: "s1", Scope: req.Scope, Generation: req.Generation, RepoRoot: "/repo", RepoRoots: []string{"/repo"}, Err: errors.New("fatal: ambiguous argument 'x'\nUse '--' to separate paths from revisions")})
 	rows := strings.Split(m.diffEmptyText(), "\n")
 	if len(rows) != 2 {
 		t.Fatalf("a two-line git error rendered %d rows: %q", len(rows), rows)
@@ -186,7 +190,7 @@ func TestMultiLineGitErrorKeepsItsLines(t *testing.T) {
 // different cells.
 func TestReviewedFileCannotDriveTheTerminal(t *testing.T) {
 	m := buildModel(t)
-	if m.gitDrv == nil {
+	if m.services.gitDrv == nil {
 		t.Skip("git not installed")
 	}
 	// An OSC window-title set and a clear-screen, sequences our renderer
@@ -204,7 +208,7 @@ func TestReviewedFileCannotDriveTheTerminal(t *testing.T) {
 		if stray := strayControl(frame); stray != "" {
 			t.Errorf("%s layout leaks a control byte to the terminal near %q", layout, stray)
 		}
-		m.diff.sideBySide = !m.diff.sideBySide
+		m.review.ToggleSideBySide(m.diffCodeHeight())
 	}
 }
 
@@ -212,7 +216,7 @@ func TestReviewedFileCannotDriveTheTerminal(t *testing.T) {
 // does carry nothing but SGR, so a stray control byte means something leaked.
 func TestCleanReviewFrameCarriesOnlySGR(t *testing.T) {
 	m := buildModel(t)
-	if m.gitDrv == nil {
+	if m.services.gitDrv == nil {
 		t.Skip("git not installed")
 	}
 	openReviewOn(t, m, "clean", gitRepoWithTwoChangedFiles(t))
@@ -226,7 +230,7 @@ func TestCleanReviewFrameCarriesOnlySGR(t *testing.T) {
 // the file rail, the code title and the comment bar unquoted.
 func TestReviewedPathCannotDriveTheTerminal(t *testing.T) {
 	m := buildModel(t)
-	if m.gitDrv == nil {
+	if m.services.gitDrv == nil {
 		t.Skip("git not installed")
 	}
 	dir := committedRepo(t)

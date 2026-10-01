@@ -2,8 +2,6 @@ package ui
 
 import (
 	"errors"
-	"fmt"
-	"io/fs"
 	"os"
 	"strings"
 
@@ -11,8 +9,7 @@ import (
 	"github.com/YoanWai/agent-manager/internal/config"
 	"github.com/YoanWai/agent-manager/internal/deps"
 	"github.com/YoanWai/agent-manager/internal/mcpreg"
-	"github.com/YoanWai/agent-manager/internal/status"
-	"github.com/YoanWai/agent-manager/internal/store"
+	"github.com/YoanWai/agent-manager/internal/sessioncmd"
 	"github.com/YoanWai/agent-manager/internal/tmux"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -25,24 +22,24 @@ import (
 // prompt names. command is empty when the manager knows no recipe, which
 // leaves the dialog read-only.
 type launchFix struct {
-	text    string
-	command string
-	binary  string
-	retry   func() error
-	images  []imageAttachment
+	text        string
+	command     string
+	binary      string
+	effectRetry effectRequest
+	images      []imageAttachment
 }
 
 // pendingInstall is an install the dialog started in a shell tab: the
 // session running it, the files its script writes and runs from, and the
 // launch to finish once the command's exit status lands.
 type pendingInstall struct {
-	sessionID  string
-	name       string
-	binary     string
-	statusFile string
-	script     string
-	retry      func() error
-	images     []imageAttachment
+	sessionID   string
+	name        string
+	binary      string
+	statusFile  string
+	script      string
+	effectRetry effectRequest
+	images      []imageAttachment
 }
 
 // copyLaunchCommand is the seam tests swap so a copy never reaches the
@@ -56,9 +53,9 @@ type launchCommandCopiedMsg struct {
 // reportLaunchError routes a failed spawn to the right surface: a launch
 // the manager refused for a missing prerequisite opens a dialog naming the
 // command that unblocks it, anything else stays a line of status text.
-// retry is the launch to run again once that command has done its work;
-// nil when the caller has no way to repeat it.
-func (m *Model) reportLaunchError(err error, retry func() error) {
+// A retry, when one exists, is attached by the typed effect completion that
+// failed; this error router never carries or invokes a Model closure.
+func (m *Model) reportLaunchError(err error) {
 	var hermesMCP mcpreg.HermesMCPUnavailableError
 	if errors.As(err, &hermesMCP) {
 		step := "Install the mcp package into the Python that runs Hermes, then spawn again."
@@ -70,7 +67,6 @@ func (m *Model) reportLaunchError(err error, retry func() error) {
 				step,
 			command: hermesMCP.PipCommand,
 			binary:  "hermes",
-			retry:   retry,
 		})
 		return
 	}
@@ -80,7 +76,6 @@ func (m *Model) reportLaunchError(err error, retry func() error) {
 			text:    missingToolText(missing),
 			command: deps.Command(missing.Binary),
 			binary:  missing.Binary,
-			retry:   retry,
 		})
 		return
 	}
@@ -105,6 +100,7 @@ func missingToolText(missing config.MissingToolError) string {
 // files until the launch runs or is given up, so the form and the quick
 // bar can be reopened meanwhile.
 func (m *Model) openLaunchHint(fix launchFix) {
+	m.dialogGen++
 	fix.images = append(fix.images, m.form.prompt.attachments...)
 	fix.images = append(fix.images, m.quick.attachments...)
 	m.form.prompt.attachments = nil
@@ -129,7 +125,7 @@ func dropImages(images []imageAttachment) {
 func (m *Model) handleLaunchHintKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		return m, tea.Quit
+		return m.requestQuit()
 	case "c":
 		if m.launchFix.command == "" {
 			return m, nil
@@ -165,64 +161,44 @@ func (m *Model) handleLaunchCommandCopied(msg launchCommandCopiedMsg) {
 	m.reportDone("copied to clipboard")
 }
 
-// startInstall types the dialog's command into a new shell tab, so the
-// user can watch it and answer its prompts, and remembers the launch to
-// finish once the shell reports how the command ended. The command runs
-// in the user's own shell so an installer sees the same PATH and tools
-// a hand-typed one would.
+// startInstall captures the setup dialog and queues its filesystem, store,
+// lifecycle, and tmux work. The dialog stays in front until that job says
+// the command was typed into a durable shell row.
 func (m *Model) startInstall() (tea.Model, tea.Cmd) {
 	if m.install != nil {
 		m.errBar.text = "an install is already running in " + m.install.name
 		return m, nil
 	}
+	for _, job := range append([]*effectJob{m.effects.active}, m.effects.pending...) {
+		if job == nil {
+			continue
+		}
+		if request, ok := job.request.(installStartRequest); ok {
+			m.errBar.text = "an install is already starting for " + request.binary
+			return m, nil
+		}
+	}
 	fix := m.launchFix
-	toolName, tool := m.shellTool()
-	home, err := os.UserHomeDir()
-	if err != nil {
-		m.errBar.text = err.Error()
-		return m, nil
+	toolName, _ := m.shellTool()
+	w, h := m.paneTargetSize()
+	retry := fix.effectRetry
+	if spawn, ok := retry.(spawnRequest); ok && len(spawn.images) == 0 {
+		spawn.images = append([]imageAttachment(nil), fix.images...)
+		retry = spawn
 	}
-	sess := store.Session{
-		ID:     newID(),
-		Name:   "install-" + fix.binary,
-		Tool:   toolName,
-		Cwd:    home,
-		Group:  m.contextGroup(),
-		Status: status.Starting,
-	}
-	statusFile := m.hooks.InstallStatusFile(sess.ID)
-	script, err := m.hooks.WriteInstallScript(sess.ID, installScript(fix.command, statusFile))
-	if err != nil {
-		m.errBar.text = err.Error()
-		return m, nil
-	}
-	if err := m.launchNewSession(sess, tool, tool.Command, launchOptions{}); err != nil {
-		removeInstallFiles(statusFile, script)
-		m.errBar.text = err.Error()
-		return m, nil
-	}
-	if err := m.tmux.SendText(sess.ID, "sh "+tmux.ShellQuote(script)); err != nil {
-		// The shell is left open: it is a tab like any other, and the
-		// command it never ran is still on the dialog to copy.
-		removeInstallFiles(statusFile, script)
-		m.errBar.text = err.Error()
-		return m, nil
-	}
-	m.install = &pendingInstall{
-		sessionID:  sess.ID,
-		name:       sess.Name,
-		binary:     fix.binary,
-		statusFile: statusFile,
-		script:     script,
-		retry:      fix.retry,
-		images:     fix.images,
-	}
-	m.launchFix = launchFix{}
-	m.mode = modeList
-	m.statusFilter = statusFilterAll
-	m.focusSession(sess.ID)
-	m.reportDone("installing " + fix.binary)
-	return m, m.refreshCmd()
+	m.launchFix.images = nil
+	m.enqueueEffect(installStartRequest{
+		gen:         m.dialogGen,
+		id:          newID(),
+		command:     fix.command,
+		binary:      fix.binary,
+		toolName:    toolName,
+		group:       m.contextGroup(),
+		pane:        sessioncmd.PaneSize{Width: w, Height: h},
+		effectRetry: retry,
+		images:      fix.images,
+	}, 0, false)
+	return m, nil
 }
 
 // installScript shows the command, runs it, and records how it ended. The
@@ -239,76 +215,22 @@ func installScript(command, statusFile string) string {
 		`printf %s "$?" > ` + tmux.ShellQuote(statusFile) + "\n"
 }
 
-// settleInstall runs on every poll while an install is pending: once the
-// shell has written the command's exit status, the launch the dialog
-// refused runs again, or the failure is put on the status line with the
-// tab still open to read.
+// settleInstall queues one captured status check. Polls arriving while that
+// request waits or runs do not add duplicates to the ordered effect lane.
 func (m *Model) settleInstall() {
 	install := m.install
 	if install == nil {
 		return
 	}
-	data, err := os.ReadFile(install.statusFile)
-	if errors.Is(err, fs.ErrNotExist) {
-		// A shell killed before the command ended takes the launch with it.
-		if !m.tmux.Exists(install.sessionID) {
-			m.install = nil
-			removeInstallFiles(install.statusFile, install.script)
-			dropImages(install.images)
+	for _, job := range append([]*effectJob{m.effects.active}, m.effects.pending...) {
+		if job == nil {
+			continue
 		}
-		return
-	}
-	if err != nil {
-		m.install = nil
-		removeInstallFiles(install.statusFile, install.script)
-		m.errBar.text = err.Error()
-		return
-	}
-	// The shell creates the file before printf fills it; an empty file is a
-	// command that has just ended, and the next poll reads its status.
-	code := strings.TrimSpace(string(data))
-	if code == "" {
-		return
-	}
-	m.install = nil
-	removeInstallFiles(install.statusFile, install.script)
-	if code != "0" {
-		dropImages(install.images)
-		m.errBar.text = fmt.Sprintf("%s install exited with status %s; its output is in %s", install.binary, code, install.name)
-		return
-	}
-	if err := config.CheckInstalled(install.binary); err != nil {
-		dropImages(install.images)
-		var missing config.MissingToolError
-		if !errors.As(err, &missing) {
-			m.errBar.text = fmt.Sprintf("%s installer finished, and looking for it failed: %v", install.binary, err)
+		if request, ok := job.request.(installSettleRequest); ok && request.install.sessionID == install.sessionID {
 			return
 		}
-		m.errBar.text = fmt.Sprintf("%s installer finished, but %s is still not on PATH; add its directory to PATH, the installer's output names it", install.binary, install.binary)
-		return
 	}
-	if install.retry == nil {
-		dropImages(install.images)
-		m.reportDone(install.binary + " installed")
-		return
-	}
-	if err := install.retry(); err != nil {
-		m.reportLaunchError(err, install.retry)
-		if m.mode != modeLaunchHint {
-			dropImages(install.images)
-			return
-		}
-		// The dialog can still clear whatever stopped it this time and
-		// spawn the same prompt, so it keeps holding the images.
-		m.launchFix.images = append(install.images, m.launchFix.images...)
-		return
-	}
-	// The launched prompt names the image paths, so the files stay for the
-	// agent to read; the stale-paste sweep retires them.
-	m.statusFilter = statusFilterAll
-	m.rebuildRows()
-	m.requestRefresh()
-	m.reportDone(install.binary + " installed; the session it was holding up is launching")
+	m.enqueueEffect(installSettleRequest{install: *install}, 0, false)
 }
 
 func (m *Model) viewLaunchHint() string {
