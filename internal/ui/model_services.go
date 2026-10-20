@@ -34,4 +34,5 @@ type services struct {
 	// to hold transport without blocking Bubble Tea's Update loop.
 	quickSessionExists func(*tmux.Driver, string) (bool, error)
 	quickSendText      func(*tmux.Driver, string, string) (tmux.SendResult, error)
+	quickSendKeys      func(driver *tmux.Driver, id string, ready func(pane string) error, keys ...string) error
 }

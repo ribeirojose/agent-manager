@@ -5,6 +5,8 @@
 package quick
 
 import (
+	"strconv"
+
 	"github.com/YoanWai/agent-manager/internal/ui/spawn"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -23,6 +25,16 @@ type Host interface {
 	ClearErr()
 	Prompt() spawn.Prompt
 	Target() (Target, bool)
+	// Dialog is the numbered choice the selected session waits on.
+	Dialog() (Dialog, bool)
+}
+
+// Dialog is a numbered choice an agent waits on: its question, its options
+// and the one its cursor is on, counted from 0.
+type Dialog struct {
+	Question string
+	Options  []string
+	Selected int
 }
 
 // Request is root work a bar key or click asks for once the bar has taken
@@ -39,6 +51,9 @@ type Request struct {
 	// Send answers the selected session with Text.
 	Send bool
 	Text string
+	// Choose picks option Choose (counted from 1) of the dialog the
+	// selected session waits on, in place of typing.
+	Choose int
 	// Spawn starts a session in the selected group.
 	Spawn *spawn.Request
 	// LoadSaved asks for the catalog the saved prompts list opened on;
@@ -199,6 +214,9 @@ func (q *Bar) HandleKey(h Host, msg tea.KeyMsg) (tea.Cmd, Request) {
 	case "enter":
 		return nil, q.Submit(h)
 	}
+	if option, ok := dialogDigit(h, msg.String()); ok {
+		return nil, Request{Choose: option}
+	}
 	if cmd, handled := prompt.ChipKey(msg); handled {
 		return cmd, Request{}
 	}
@@ -215,6 +233,24 @@ func (q *Bar) LoadSaved(rows []spawn.Saved, err error) {
 // SavedOpen says the saved prompts list is showing, which a catalog read
 // that answers late finds closed.
 func (q *Bar) SavedOpen() bool { return q.savedList.Open() }
+
+// dialogDigit is the option a digit picks while the selected session waits
+// on a choice and the prompt is empty, so a digit typed into a draft stays
+// text.
+func dialogDigit(h Host, key string) (int, bool) {
+	if len(key) != 1 || key[0] < '1' || key[0] > '9' || h.Prompt().Message() != "" {
+		return 0, false
+	}
+	if target, ok := h.Target(); !ok || target.IsGroup {
+		return 0, false
+	}
+	dialog, ok := h.Dialog()
+	option := int(key[0] - '0')
+	if !ok || option > len(dialog.Options) {
+		return 0, false
+	}
+	return option, true
+}
 
 func savedRequest(pick spawn.SavedPick) Request {
 	if !pick.Picked {
@@ -237,6 +273,19 @@ func (q *Bar) Submit(h Host) Request {
 		return Request{}
 	}
 	text := prompt.Message()
+	dialog, waiting := Dialog{}, false
+	if !target.IsGroup {
+		dialog, waiting = h.Dialog()
+	}
+	if waiting {
+		// Typed text would land in the dialog, not reach the agent as a
+		// message; an empty enter chooses what the pane's own would.
+		if text != "" {
+			h.ReportErr("the agent is waiting on a choice - press its number, or clear the prompt and press enter for the selected one")
+			return Request{}
+		}
+		return Request{Choose: dialog.Selected + 1}
+	}
 	if text == "" {
 		h.ReportErr("prompt cannot be empty")
 		return Request{}
@@ -421,6 +470,9 @@ const (
 	ClickEntry
 	// ClickSaved picks the saved prompt on list line Entry.
 	ClickSaved
+	// ClickOption chooses option Entry, counted from 0, of the dialog the
+	// selected session waits on.
+	ClickOption
 )
 
 // Hits are the bar's clickable stretches as last painted.
@@ -459,6 +511,8 @@ func (q *Bar) Click(h Host, hit Hit) Request {
 		q.closePick(h)
 	case ClickSaved:
 		return savedRequest(q.savedList.Click(hit.Entry))
+	case ClickOption:
+		return Request{Choose: hit.Entry + 1}
 	}
 	return Request{}
 }
@@ -485,6 +539,11 @@ func (q *Bar) Legend(h Host) [][2]string {
 		return q.savedList.Hint("insert", "back to the prompt")
 	}
 	pairs := [][2]string{{"↵", "send"}, {"↑↓", "target or caret"}, {"tab", "tool"}}
+	if target, ok := h.Target(); ok && !target.IsGroup {
+		if dialog, waiting := h.Dialog(); waiting {
+			pairs = [][2]string{{"1-" + strconv.Itoa(len(dialog.Options)), "choose"}, {"↵", "choose selected"}, {"↑↓", "target or caret"}}
+		}
+	}
 	if len(q.toolNames) > 1 {
 		pairs = append(pairs, [2]string{"shift+tab", "previous tool"})
 	}

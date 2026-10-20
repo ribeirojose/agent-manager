@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"context"
+
 	"github.com/YoanWai/agent-manager/internal/config"
 	"github.com/YoanWai/agent-manager/internal/execution"
 	"github.com/YoanWai/agent-manager/internal/git"
@@ -31,6 +33,7 @@ type effectServices struct {
 	gitDrv                *git.Driver
 	quickSessionExists    func(*tmux.Driver, string) (bool, error)
 	quickSendText         func(*tmux.Driver, string, string) (tmux.SendResult, error)
+	quickSendKeys         func(driver *tmux.Driver, id string, ready func(pane string) error, keys ...string) error
 }
 
 func (m *Model) captureEffect(request effectRequest) func() (effectResult, error) {
@@ -56,6 +59,14 @@ func (m *Model) captureEffect(request effectRequest) func() (effectResult, error
 	if services.quickSendText == nil {
 		services.quickSendText = func(driver *tmux.Driver, id, text string) (tmux.SendResult, error) {
 			return driver.SendTextResult(id, text)
+		}
+	}
+	services.quickSendKeys = m.services.quickSendKeys
+	if services.quickSendKeys == nil {
+		services.quickSendKeys = func(driver *tmux.Driver, id string, ready func(string) error, keys ...string) error {
+			ctx, cancel := context.WithTimeout(context.Background(), tmux.CommandTimeout)
+			defer cancel()
+			return driver.SendKeysWhen(ctx, id, ready, keys...)
 		}
 	}
 	services.saveKeys = m.services.saveKeys

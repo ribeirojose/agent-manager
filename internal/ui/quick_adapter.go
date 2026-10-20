@@ -5,6 +5,8 @@ import (
 
 	"github.com/YoanWai/agent-manager/internal/clipboard"
 	"github.com/YoanWai/agent-manager/internal/config"
+	"github.com/YoanWai/agent-manager/internal/status"
+	"github.com/YoanWai/agent-manager/internal/store"
 	uiquick "github.com/YoanWai/agent-manager/internal/ui/quick"
 	uisettings "github.com/YoanWai/agent-manager/internal/ui/settings"
 	"github.com/YoanWai/agent-manager/internal/ui/spawn"
@@ -55,6 +57,27 @@ func (h quickBarHost) Target() (uiquick.Target, bool) {
 		return uiquick.Target{}, false
 	}
 	return uiquick.Target{Group: entry.group, IsGroup: entry.isGroup}, true
+}
+
+func (h quickBarHost) Dialog() (uiquick.Dialog, bool) {
+	_, dialog, ok := h.m.selectedDialog()
+	if !ok {
+		return uiquick.Dialog{}, false
+	}
+	return uiquick.Dialog{Question: dialog.Question, Options: dialog.Options, Selected: dialog.Selected}, true
+}
+
+// selectedDialog is the numbered choice the selected session's preview
+// shows while the poll sees it waiting.
+func (m *Model) selectedDialog() (store.Session, status.Dialog, bool) {
+	entry, ok := m.selectedRow()
+	engine := m.services.engine
+	if !ok || entry.isGroup || entry.sess.Status != status.Waiting || engine == nil {
+		return store.Session{}, status.Dialog{}, false
+	}
+	tool := entry.sess.Tool
+	dialog, ok := engine.Dialog(tool, engine.Plain(tool, m.workspace.preview))
+	return entry.sess, dialog, ok
 }
 
 func (m *Model) openQuickMode() tea.Cmd {
@@ -135,6 +158,23 @@ func (m *Model) runQuickRequest(request uiquick.Request) tea.Cmd {
 			text:           request.Text,
 			closeAfterSend: m.quick.closeAfterSend,
 			images:         m.quick.attachments,
+		}) {
+			return nil
+		}
+		m.clearErr()
+		return m.nextEffectCmd()
+	case request.Choose != 0:
+		sess, dialog, ok := m.selectedDialog()
+		if !ok || request.Choose > len(dialog.Options) {
+			m.reportErr("the selected session is no longer waiting on that choice")
+			return nil
+		}
+		if !m.dispatchQuickSend(quickSendRequest{
+			session:        sess,
+			composerGen:    m.quick.gen,
+			draft:          m.quick.input.Value(),
+			closeAfterSend: m.quick.closeAfterSend,
+			answer:         &dialogAnswer{dialog: dialog, option: request.Choose - 1},
 		}) {
 			return nil
 		}
@@ -293,6 +333,9 @@ func (m *Model) quickFooter() legend {
 	rows := quickBarMaxRows + 1
 	if m.quick.Picking() != uiquick.PickNone {
 		rows = max(m.layout.height/2, rows)
+	}
+	if _, dialog, ok := m.selectedDialog(); ok {
+		rows += uiquick.DialogRows(len(dialog.Options))
 	}
 	const minBody = 3
 	room := m.layout.height - m.listChromeRows() - 1 - minBody - len(keys)

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/YoanWai/agent-manager/internal/config"
+	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/tmux"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -300,5 +302,70 @@ func TestBlockedQuickSendsKeepUpdateResponsiveRunFIFOAndDrainOnQuit(t *testing.T
 	}
 	if m.effects.main.active != nil || quit == nil {
 		t.Fatal("queued quick send did not finish the quit drain")
+	}
+}
+
+// claudeDialogEngine reads the selected session's tool by Claude Code's
+// rules, which draw the dialog the answer tests choose from.
+func claudeDialogEngine(t *testing.T, m *Model, tool string) {
+	t.Helper()
+	cfg, err := config.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Tools[tool] = cfg.Tools["claude"]
+	engine, err := status.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.services.engine = engine
+}
+
+const claudeDialogPane = "Do you prefer cats or dogs?\n\n" +
+	"❯ 1. Cats\n     You prefer cats\n  2. Dogs\n     You prefer dogs\n  3. Type something.\n" +
+	"────────────\n  4. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel"
+
+// A digit on the bar chooses the option with arrows from the selected one,
+// once the pane still shows the dialog the bar did; a dialog that moved on
+// before the effect ran is left alone.
+func TestQuickBarAnswersAWaitingDialog(t *testing.T) {
+	t.Parallel()
+	m := buildModel(t)
+	createSession(t, m, "target", t.TempDir(), "")
+	for i := range m.workspace.sessions {
+		m.workspace.sessions[i].Status = status.Waiting
+	}
+	m.rebuildRows()
+	m.selectSessionRow(t, "target")
+	claudeDialogEngine(t, m, m.sessionRows()[0].Tool)
+	m.workspace.preview = claudeDialogPane
+	m.openQuickMode()
+	if !strings.Contains(m.viewQuickBar(80, 12), "Do you prefer cats or dogs?") {
+		t.Fatalf("the bar does not show the question:\n%s", m.viewQuickBar(80, 12))
+	}
+
+	screen := claudeDialogPane
+	var pressed []string
+	m.services.quickSessionExists = func(*tmux.Driver, string) (bool, error) { return true, nil }
+	m.services.quickSendKeys = func(_ *tmux.Driver, _ string, ready func(string) error, keys ...string) error {
+		if err := ready(screen); err != nil {
+			return err
+		}
+		pressed = append(pressed, keys...)
+		return nil
+	}
+	_, cmd := m.handleQuickKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
+	m.applyTestMsg(t, cmd())
+	if strings.Join(pressed, " ") != "Down Enter" || m.errBar.done != "answered target: Dogs" {
+		t.Fatalf("pressed %v, status %q", pressed, m.errBar.text)
+	}
+
+	pressed = nil
+	screen = strings.Replace(claudeDialogPane, "❯ 1. Cats", "  1. Cats", 1)
+	screen = strings.Replace(screen, "  2. Dogs", "❯ 2. Dogs", 1)
+	_, cmd = m.handleQuickKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("1")})
+	m.applyTestMsg(t, cmd())
+	if len(pressed) != 0 || !strings.Contains(m.errBar.text, "dialog changed") {
+		t.Fatalf("a moved cursor still pressed %v, err %q", pressed, m.errBar.text)
 	}
 }

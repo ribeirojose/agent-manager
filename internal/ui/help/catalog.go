@@ -136,6 +136,7 @@ func helpSections(ctx Context) []helpSection {
 		{title: "group under the cursor", rows: groupRowHelpRows(list)},
 		{title: titledWith("quick prompt mode", list, keybind.Prompt), rows: [][2]string{
 			{"↵", "send"},
+			{"1-9", "prompt empty: choose an option of the dialog the agent waits on"},
 			{"↑↓", "switch the target session, or step the caret in a taller prompt"},
 			{"tab", "step the tool a spawn uses forward (alt+m too)"},
 			{"shift+tab", "step the tool a spawn uses back one"},
@@ -143,6 +144,7 @@ func helpSections(ctx Context) []helpSection {
 			{ctx.QuickKeys.Effort, "step the spawn's reasoning effort through the model's levels"},
 			{ctx.QuickKeys.Profile, "step the spawn's profile, for a tool that has them"},
 			{"click", "step a spawn choice the way its key does, or pick a listed model"},
+			{"click option", "choose that option of the dialog the agent waits on"},
 			{"ctrl+t", "toggle worktree for the spawned agent (alt+w too)"},
 			{"ctrl+v", "paste an image as a chip at the cursor"},
 			{"⌫", "next to a chip, delete the whole chip"},

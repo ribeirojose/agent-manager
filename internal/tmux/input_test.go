@@ -309,3 +309,39 @@ func TestSendTextHoldsASecondSendToThePaneUntilTheFirstSubmits(t *testing.T) {
 		t.Fatalf("%d pastes reached the pane before the first Enter, calls:\n%s", loads, logged)
 	}
 }
+
+// SendKeysWhen sends nothing when the screen it reads first is refused, and
+// the keys when it is accepted.
+func TestSendKeysWhenChecksTheScreenFirst(t *testing.T) {
+	testenv.SkipPOSIXShell(t)
+	driver := requireTmux(t)
+	id := "when" + strings.ReplaceAll(time.Now().Format("150405.000000"), ".", "")
+	if err := driver.Create(id, paneDir(), "cat", nil, 0, 0); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { driver.Kill(id) })
+
+	moved := errors.New("moved on")
+	err := driver.SendKeysWhen(context.Background(), id, func(string) error { return moved }, "n", "o", "Enter")
+	if !errors.Is(err, moved) {
+		t.Fatalf("SendKeysWhen = %v, want the refusal", err)
+	}
+	read := false
+	if err := driver.SendKeysWhen(context.Background(), id, func(string) error { read = true; return nil }, "o", "k", "Enter"); err != nil || !read {
+		t.Fatalf("SendKeysWhen = %v read=%v", err, read)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	var pane string
+	for time.Now().Before(deadline) {
+		if pane, err = driver.CapturePane(id); err != nil {
+			t.Fatalf("CapturePane: %v", err)
+		}
+		if strings.Contains(pane, "ok") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(pane, "ok") || strings.Contains(pane, "no") {
+		t.Fatalf("pane = %q, want only the accepted keys", pane)
+	}
+}

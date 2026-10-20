@@ -121,6 +121,29 @@ func (d *Driver) SendKeys(id string, keys ...string) error {
 	return err
 }
 
+// SendKeysWhen delivers keys under the pane's send gate once ready accepts
+// a capture taken inside it, so keys chosen from an older screen are never
+// pressed into a newer one, nor between a send's paste and its Enter.
+// ready's error is returned as it is, and nothing is sent.
+func (d *Driver) SendKeysWhen(ctx context.Context, id string, ready func(pane string) error, keys ...string) error {
+	target := PaneTarget(id)
+	release, err := enterPaneSendGate(ctx, d.socket, target)
+	if err != nil {
+		return err
+	}
+	defer release()
+	pane, err := d.runContext(ctx, "capture-pane", "-p", "-e", "-t", target)
+	if err != nil {
+		return fmt.Errorf("read the pane: %w", err)
+	}
+	if err := ready(pane); err != nil {
+		return err
+	}
+	args := []string{"send-keys", "-t", target, "--"}
+	_, err = d.runContext(ctx, append(args, keys...)...)
+	return err
+}
+
 // Paste delivers text into the session's pane without submitting it. The
 // focus path uses this for clipboard pastes: sending the bytes as raw
 // keystrokes would turn every newline into an Enter press and submit the

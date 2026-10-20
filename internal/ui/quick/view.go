@@ -1,6 +1,7 @@
 package quick
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/YoanWai/agent-manager/internal/ui/presentation"
@@ -33,6 +34,7 @@ func (q *Bar) View(h Host, facts Facts, width, maxRows int) string {
 	}
 	target := label("target") + st.Muted.Render("no selection")
 	q.hits = q.hits[:0]
+	var asks []string
 	if selected, ok := h.Target(); ok {
 		if selected.IsGroup {
 			group := lipgloss.NewStyle().Foreground(st.Accent2).Render(facts.Group)
@@ -44,12 +46,15 @@ func (q *Bar) View(h Host, facts Facts, width, maxRows int) string {
 			target = q.statusRow(h, facts, label("new")+group, width, 0)
 		} else {
 			target = facts.Answer
+			if dialog, waiting := h.Dialog(); waiting {
+				asks = q.dialogLines(dialog, label, width, st)
+			}
 		}
 	}
 	// Count wrapped rows only after setting the width.
 	prompt := h.Prompt()
-	prompt.Fit(width, max(min(maxRows-1, BarMaxRows), 1))
-	bar := target + "\n" + prompt.View()
+	prompt.Fit(width, max(min(maxRows-1-len(asks), BarMaxRows), 1))
+	bar := strings.Join(append([]string{target}, asks...), "\n") + "\n" + prompt.View()
 	if !q.savedList.Open() {
 		return bar
 	}
@@ -61,6 +66,29 @@ func (q *Bar) View(h Host, facts Facts, width, maxRows int) string {
 		q.hits = append(q.hits, Hit{Line: i, X0: 0, X1: width, Action: ClickSaved, Entry: i})
 	}
 	return strings.Join(lines, "\n") + "\n" + bar
+}
+
+// DialogRows is how many rows the bar gives a dialog with n options: its
+// question and one row each.
+func DialogRows(n int) int { return n + 1 }
+
+// dialogLines are the question a session waits on and its options, each a
+// stretch a click chooses, starting on the line under the target.
+func (q *Bar) dialogLines(dialog Dialog, label func(string) string, width int, st spawn.Styles) []string {
+	lines := []string{ansi.Truncate(label("asks")+st.Value.Render(presentation.EscapeControlsInline(dialog.Question)), width, "…")}
+	indent := strings.Repeat(" ", ansi.StringWidth(label("")))
+	for i, option := range dialog.Options {
+		row := st.Muted.Render(strconv.Itoa(i+1)+". ") + presentation.EscapeControlsInline(option)
+		if i == dialog.Selected {
+			row = lipgloss.NewStyle().Foreground(st.Accent2).Render("› ") + row
+		} else {
+			row = "  " + row
+		}
+		// The target row is the bar's first line, above the question.
+		q.hits = append(q.hits, Hit{Line: 1 + len(lines), X0: 0, X1: width, Action: ClickOption, Entry: i})
+		lines = append(lines, ansi.Truncate(indent+row, width, "…"))
+	}
+	return lines
 }
 
 // savedListRows caps the saved prompts list above the prompt.

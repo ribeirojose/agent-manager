@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/YoanWai/agent-manager/internal/status"
 	"github.com/YoanWai/agent-manager/internal/store"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -26,7 +27,21 @@ type quickSendRequest struct {
 	text           string
 	closeAfterSend bool
 	images         []imageAttachment
+	// answer, when set, chooses an option of the dialog the pane showed in
+	// place of typing text.
+	answer *dialogAnswer
 }
+
+// dialogAnswer is an option of the dialog as the bar showed it, which the
+// pane must still show, cursor and all, for the keys reaching it to choose
+// that option.
+type dialogAnswer struct {
+	dialog status.Dialog
+	option int
+}
+
+// errDialogChanged refuses an answer whose dialog moved on before it ran.
+var errDialogChanged = errors.New("the dialog changed before the answer ran; nothing was sent")
 
 func (quickSendRequest) effectRequest() {}
 
@@ -75,6 +90,9 @@ func (s effectServices) runQuickSend(request quickSendRequest) (effectResult, er
 	if !exists {
 		return result, errors.New(deadSessionHint)
 	}
+	if request.answer != nil {
+		return s.runQuickAnswer(current, *request.answer), nil
+	}
 	sent, sendErr := s.quickSendText(s.driver, current.ID, request.text)
 	if sendErr != nil {
 		result.sendErr = sendErr
@@ -88,6 +106,29 @@ func (s effectServices) runQuickSend(request quickSendRequest) (effectResult, er
 	return result, nil
 }
 
+// runQuickAnswer presses the keys that choose the option, once the pane
+// still shows the dialog they were built from. Keys refused before that
+// check passed reached nothing; once it passed, a failure may have moved
+// the cursor or chosen.
+func (s effectServices) runQuickAnswer(current store.Session, answer dialogAnswer) quickSendResult {
+	checked := false
+	err := s.quickSendKeys(s.driver, current.ID, func(pane string) error {
+		now, ok := s.engine.Dialog(current.Tool, s.engine.Plain(current.Tool, pane))
+		if !ok || !now.Equal(answer.dialog) {
+			return errDialogChanged
+		}
+		checked = true
+		return nil
+	}, answer.dialog.Keys(answer.option)...)
+	switch {
+	case err == nil:
+		return quickSendResult{outcome: quickSendConfirmed}
+	case checked:
+		return quickSendResult{outcome: quickSendUncertain, sendErr: err}
+	}
+	return quickSendResult{outcome: quickSendRefused, sendErr: err}
+}
+
 func sameQuickSendTarget(current, captured store.Session) bool {
 	return current.ID == captured.ID &&
 		current.CreatedAt.Equal(captured.CreatedAt) &&
@@ -99,12 +140,24 @@ func sameQuickSendTarget(current, captured store.Session) bool {
 func (m *Model) applyQuickSend(request quickSendRequest, result quickSendResult, err error) tea.Cmd {
 	if err != nil || result.outcome == quickSendRefused {
 		cleanup := m.returnQuickSendImages(request)
-		if err != nil {
+		switch {
+		case err != nil:
 			m.reportErr(err.Error())
-		} else {
+		case request.answer != nil:
+			m.reportErr(fmt.Sprintf("%s was not answered: %v", request.session.Name, result.sendErr))
+		default:
 			m.reportErr(fmt.Sprintf("prompt was not sent to %s: %v", request.session.Name, result.sendErr))
 		}
 		return cleanup
+	}
+	if request.answer != nil {
+		m.quick.clearAccepted(request)
+		if result.outcome == quickSendUncertain {
+			m.reportErr(fmt.Sprintf("the answer may have reached %s and was not sent again: %v", request.session.Name, result.sendErr))
+			return nil
+		}
+		m.reportDone(fmt.Sprintf("answered %s: %s", request.session.Name, request.answer.dialog.Options[request.answer.option]))
+		return nil
 	}
 
 	m.quick.clearAccepted(request)
