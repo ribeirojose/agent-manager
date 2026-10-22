@@ -10,9 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -258,15 +256,6 @@ func recaptureCommandCode(root, cwd string, snapshot map[string]int64, claimed m
 	return recaptureCandidates(cands, err, snapshot)
 }
 
-func snapshotGemini(root, cwd string) (map[string]int64, bool) {
-	return snapshotCandidates(geminiCandidates(root, cwd, time.Time{}, nil))
-}
-
-func recaptureGemini(root, cwd string, snapshot map[string]int64, claimed map[string]bool) []candidate {
-	cands, err := geminiCandidates(root, cwd, time.Time{}, claimed)
-	return recaptureCandidates(cands, err, snapshot)
-}
-
 func snapshotOpencode(cwd string) (map[string]int64, bool) {
 	entries, ok := opencodeSessionListJSON(cwd)
 	if !ok {
@@ -314,7 +303,13 @@ func openReadOnly(path string) (*sql.DB, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	// A Windows path (C:/...) needs a leading slash, or SQLite reads the drive
+	// as the URI authority (file://C:/...) and refuses to open it.
+	dbPath := filepath.ToSlash(path)
+	if filepath.VolumeName(path) != "" && !strings.HasPrefix(dbPath, "/") {
+		dbPath = "/" + dbPath
+	}
+	dsn := url.URL{Scheme: "file", Path: dbPath}
 	query := dsn.Query()
 	query.Set("mode", "ro")
 	dsn.RawQuery = query.Encode()
@@ -492,11 +487,11 @@ func hermesStateDB() string {
 		return filepath.Join(root, "state.db")
 	}
 	if root == "" {
-		home, err := os.UserHomeDir()
+		home, err := hermesDefaultHome()
 		if err != nil {
 			return ""
 		}
-		root = filepath.Join(home, ".hermes")
+		root = home
 	}
 	if data, err := os.ReadFile(filepath.Join(root, "active_profile")); err == nil {
 		profile := strings.TrimSpace(string(data))
@@ -605,6 +600,12 @@ var opencodeIDPattern = regexp.MustCompile(`ses_[A-Za-z0-9]+`)
 // from us, and it goes on to name a session and reach a command line, so
 // one shaped like anything else is left where it was found.
 var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ValidSessionID reports whether an id an agent reported has the shape a
+// conversation id is allowed to take before it reaches a command line.
+func ValidSessionID(id string) bool {
+	return sessionIDPattern.MatchString(id)
+}
 
 // opencodeListIDs returns session ids newest-first from `opencode session
 // list` run in cwd. A package variable so tests substitute canned output.
@@ -868,85 +869,6 @@ func captureOpencode(cwd string, launchedAt time.Time, claimed map[string]bool) 
 	return pickEarliest(cands)
 }
 
-func geminiRoot() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, ".gemini", "tmp")
-}
-
-// geminiProjectHash mirrors gemini's per-project key, the hex sha256 of the
-// resolved working directory. Session files record it in their header, so a
-// conversation can be matched to its directory without relying on the
-// per-project folder name, which gemini does not derive consistently.
-func geminiProjectHash(cwd string) string {
-	sum := sha256.Sum256([]byte(resolvePath(cwd)))
-	return hex.EncodeToString(sum[:])
-}
-
-// geminiSessionMeta reads the session id and project hash from a gemini
-// session file's first line.
-func geminiSessionMeta(path string) (id, projectHash string, err error) {
-	first, err := firstLine(path)
-	if err != nil {
-		return "", "", err
-	}
-	var header struct {
-		SessionID   string `json:"sessionId"`
-		ProjectHash string `json:"projectHash"`
-	}
-	if json.Unmarshal(first, &header) != nil || !sessionIDPattern.MatchString(header.SessionID) {
-		return "", "", nil
-	}
-	return header.SessionID, header.ProjectHash, nil
-}
-
-// captureGemini finds the conversation gemini minted for a session launched
-// in cwd. A fork via `gemini --session-file` names its own id, so the file
-// is located by matching the project hash gemini records for cwd among
-// session files written at or after launch.
-func captureGemini(root, cwd string, launchedAt time.Time, claimed map[string]bool) (string, bool) {
-	return captureCandidates(geminiCandidates(root, cwd, launchedAt.Add(-clockSlack), claimed))
-}
-
-func geminiCandidates(root, cwd string, cutoff time.Time, claimed map[string]bool) ([]candidate, error) {
-	if root == "" {
-		return nil, os.ErrNotExist
-	}
-	wantHash := geminiProjectHash(cwd)
-	var cands []candidate
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		name := d.Name()
-		if !strings.HasPrefix(name, "session-") || !strings.HasSuffix(name, ".jsonl") {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.ModTime().Before(cutoff) {
-			return nil
-		}
-		id, hash, err := geminiSessionMeta(path)
-		if err != nil {
-			return err
-		}
-		if id == "" || hash != wantHash || claimed[id] {
-			return nil
-		}
-		cands = append(cands, candidate{id: id, modTime: info.ModTime()})
-		return nil
-	})
-	return cands, err
-}
-
 // SupportsSessionFile reports whether a session store keeps conversations in
 // a file a fork can load, which is what the {session_file} placeholder needs.
 // gemini is the only store that does; codex and opencode fork by id.
@@ -963,35 +885,4 @@ func SessionFile(sessionStore, id string) (string, error) {
 		return "", fmt.Errorf("session_store %q keeps no session file to fork from", sessionStore)
 	}
 	return geminiSessionFileIn(geminiRoot(), id)
-}
-
-func geminiSessionFileIn(root, id string) (string, error) {
-	if root == "" {
-		return "", fmt.Errorf("cannot resolve the gemini home directory")
-	}
-	prefix := id
-	if len(prefix) > 8 {
-		prefix = prefix[:8]
-	}
-	var found string
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || found != "" {
-			return nil
-		}
-		name := d.Name()
-		if !strings.HasPrefix(name, "session-") || !strings.HasSuffix(name, ".jsonl") {
-			return nil
-		}
-		if !strings.Contains(name, prefix) {
-			return nil
-		}
-		if sessionID, _, _ := geminiSessionMeta(path); sessionID == id {
-			found = path
-		}
-		return nil
-	})
-	if found == "" {
-		return "", fmt.Errorf("no gemini session file found for conversation %s", id)
-	}
-	return found, nil
 }

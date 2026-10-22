@@ -3,8 +3,10 @@ package agentsession
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -96,9 +98,24 @@ func writeFile(t *testing.T, path, content string, modTime time.Time) {
 	}
 }
 
+// setHome points os.UserHomeDir at dir: it reads HOME on Unix and
+// USERPROFILE on Windows.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
+// jsonString encodes s as a JSON string literal, so a Windows cwd's
+// backslashes survive in a hand-built record.
+func jsonString(s string) string {
+	data, _ := json.Marshal(s)
+	return string(data)
+}
+
 func codexRollout(sessionID, cwd string) string {
 	return `{"timestamp":"2026-07-18T14:36:08.127Z","type":"session_meta","payload":{"session_id":"` +
-		sessionID + `","cwd":"` + cwd + `"}}` + "\n" +
+		sessionID + `","cwd":` + jsonString(cwd) + `}}` + "\n" +
 		`{"timestamp":"2026-07-18T14:36:09Z","type":"event_msg","payload":{}}` + "\n"
 }
 
@@ -148,8 +165,8 @@ func TestCaptureCodexNoMatch(t *testing.T) {
 }
 
 func commandCodeSession(sessionID, cwd string) string {
-	return `{"type":"session","id":"` + sessionID + `","cwd":"` + cwd +
-		`","timestamp":"2026-08-22T19:22:37.338Z","version":3}` + "\n" +
+	return `{"type":"session","id":"` + sessionID + `","cwd":` + jsonString(cwd) +
+		`,"timestamp":"2026-08-22T19:22:37.338Z","version":3}` + "\n" +
 		`{"role":"user","content":[{"type":"text","text":"hi"}]}` + "\n"
 }
 
@@ -587,6 +604,9 @@ func TestFileStoresRefuseAnUnreadableConversation(t *testing.T) {
 			if snapshot, ok := store.snapshot(root, cwd); !ok || len(snapshot) != 2 {
 				t.Fatalf("readable snapshot = %v, %v; want both conversations", snapshot, ok)
 			}
+			if runtime.GOOS == "windows" {
+				t.Skip("chmod cannot deny reads on Windows")
+			}
 			if err := os.Chmod(unreadable, 0); err != nil {
 				t.Fatal(err)
 			}
@@ -635,7 +655,7 @@ func TestRecaptureBindsAfterAnEmptySnapshot(t *testing.T) {
 
 func TestRecaptureCommandCodeBindsOnlyWhatOutranTheSnapshot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	root := commandCodeRoot()
 	base := time.Now().Add(-time.Hour)
 	writeFile(t, filepath.Join(root, "old-project", "old.jsonl"),
@@ -658,7 +678,7 @@ func TestRecaptureCommandCodeBindsOnlyWhatOutranTheSnapshot(t *testing.T) {
 
 func TestRecaptureCommandCodeRefusesTwoThatOutranTheSnapshot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	root := commandCodeRoot()
 	base := time.Now().Add(-time.Hour)
 	writeFile(t, filepath.Join(root, "a", "1.jsonl"),
@@ -681,7 +701,7 @@ func TestRecaptureCommandCodeRefusesTwoThatOutranTheSnapshot(t *testing.T) {
 
 func TestRecaptureGeminiBindsOnlyWhatOutranTheSnapshot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	root := geminiRoot()
 	base := time.Now().Add(-time.Hour)
 	oursHash := geminiProjectHash("/repo")
@@ -707,7 +727,7 @@ func TestRecaptureGeminiBindsOnlyWhatOutranTheSnapshot(t *testing.T) {
 
 func TestRecaptureGeminiRefusesTwoThatOutranTheSnapshot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	root := geminiRoot()
 	base := time.Now().Add(-time.Hour)
 	hash := geminiProjectHash("/repo")
@@ -898,5 +918,63 @@ func TestSessionFileRefusesStoresWithoutAFile(t *testing.T) {
 	}
 	if !SupportsSessionFile("gemini") {
 		t.Error(`SupportsSessionFile("gemini") = false`)
+	}
+}
+
+func TestSessionIDPatternAcceptsTheShapesStoresUse(t *testing.T) {
+	for _, id := range []string{
+		"019a4b0e-39e1-7261-b801-e64f2d0e97bd",
+		"4b53d997-3d0b-4d89-a5d0-39573e4588f1",
+		"ses_8QbCd3Ef",
+		"ours-uuid",
+	} {
+		if !sessionIDPattern.MatchString(id) {
+			t.Errorf("a real id was refused: %q", id)
+		}
+	}
+	for _, id := range []string{
+		"",
+		"abc; touch pwned",
+		`abc'; touch pwned; echo '`,
+		"abc$(touch pwned)",
+		"abc\ntouch pwned",
+		"../../etc/passwd",
+		"-rf",
+	} {
+		if sessionIDPattern.MatchString(id) {
+			t.Errorf("an id that is not a plain token was accepted: %q", id)
+		}
+	}
+}
+
+// A rollout is a file any process can write, so an id spelling a command
+// must be left alone. The conversation we really launched still has to
+// bind, or one planted file would end id capture for that directory.
+func TestCaptureCodexLeavesAnIDThatIsNotAPlainToken(t *testing.T) {
+	root := t.TempDir()
+	launch := time.Now()
+	writeFile(t, filepath.Join(root, "2026/07/18/rollout-planted.jsonl"),
+		codexRollout(`abc; touch pwned`, "/repo"), launch.Add(time.Second))
+	writeFile(t, filepath.Join(root, "2026/07/18/rollout-ours.jsonl"),
+		codexRollout("ours-uuid", "/repo"), launch.Add(2*time.Second))
+
+	id, ok := captureCodex(root, "/repo", launch, map[string]bool{})
+	if !ok || id != "ours-uuid" {
+		t.Fatalf("got id=%q ok=%v, want ours-uuid true", id, ok)
+	}
+}
+
+func TestCaptureGeminiLeavesAnIDThatIsNotAPlainToken(t *testing.T) {
+	root := t.TempDir()
+	launch := time.Now()
+	hash := geminiProjectHash("/repo")
+	writeFile(t, filepath.Join(root, "proj/chats/session-1-planted.jsonl"),
+		geminiSessionFixture(`abc; touch pwned`, hash), launch.Add(time.Second))
+	writeFile(t, filepath.Join(root, "proj/chats/session-2-ours.jsonl"),
+		geminiSessionFixture("ours-uuid", hash), launch.Add(2*time.Second))
+
+	id, ok := captureGemini(root, "/repo", launch, map[string]bool{})
+	if !ok || id != "ours-uuid" {
+		t.Fatalf("got id=%q ok=%v, want ours-uuid true", id, ok)
 	}
 }
